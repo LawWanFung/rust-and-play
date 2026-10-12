@@ -7,7 +7,7 @@
     "dev": "vite",
     "build": "tsc --noEmit && vite build",
     "preview": "vite preview",
-    "check": "esbuild src/content/modules.ts --bundle --format=esm --outfile=/tmp/rq-modules.mjs --log-level=warning && node scripts/check-content.mjs /tmp/rq-modules.mjs"
+    "check": "esbuild src/content/modules.ts --bundle --format=esm --outfile=node_modules/.rq/rq-modules.mjs --log-level=warning && node scripts/check-content.mjs node_modules/.rq/rq-modules.mjs"
   },
   "dependencies": {
     "react": "^18.3.1",
