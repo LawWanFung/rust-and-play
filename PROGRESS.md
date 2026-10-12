@@ -35,11 +35,79 @@ XP → ranks → badges → module unlocks. Pure static SPA (Vite + React + TS),
 - Docs updated: PLAN.md (v0.2 ✅, actual repo layout), README.md (how it plays, adding content incl. fix/match shapes, roadmap)
 - Pushed to GitHub: LawWanFung/rust-and-play, branch `main`
 
+
+### v0.3 — SPIKE: real rustc in the browser sandbox (in progress)
+Goal: prove `rustc` (compiled to wasm) can run in the sandbox and emit real
+diagnostics. Asset: `bjorn3/wasm-rustc` (rustc 1.79.0-dev for
+`wasm32-wasip1-threads`, 81 MB wasm + x86_64-unknown-linux-gnu std rlibs) —
+the official static.rust-lang.org playground build is dead (404).
+
+**Infrastructure** (gitignored assets; `npm run fetch-spike-assets` re-downloads):
+- `public/spike/rustc.wasm` + `public/spike/sysroot/lib/rustlib/x86_64-unknown-linux-gnu/lib/` (26 rlibs + libstd .so)
+- `scripts/fetch-spike-assets.mjs` — re-download via jsDelivr
+- `scripts/spike-node.mjs` — Node harness (main entry)
+- `scripts/spike-runner-worker.mjs` — runs ONE rustc invocation on a dedicated OS thread; heartbeat (SAB timestamp stamped on every WASI import call) lets the main thread detect a wedged run and terminate+retry (3×)
+- `spike/main.ts` + `spike/index.html` — browser spike (COOP/COEP headers in vite.config.ts)
+- `scripts/patch-rustc-table.mjs` / `patch-wait-timeout.mjs` — wasm binary patch experiments (see below)
+
+**What works (validated):**
+- `rustc --version` in the sandbox ✓
+- **Valid** programs: full pipeline runs (parse → typeck → codegen → link attempt);
+  the final `cc` link step fails (no linker in sandbox) — tolerated: if the only
+  error is "could not exec the linker", the compile is treated as success.
+  `hello` case: **exit 0 in ~0.8 s, 5/5** ✓
+- Sysroot must be the real rustup layout `/sysroot/lib/rustlib/<triple>/lib/`;
+  a `/` preopen is required (rustc temp dirs like `/rmetaXXX`); the `libstd-*.so`
+  file must be present (its absence changes the thread flow and breaks runs);
+  `WASI` must be constructed with `{ debug: false }` (the shim's default debug
+  mode writes gigabytes).
+
+**The threading saga (why buggy cases are the hard part):**
+- rustc spawns a real OS thread at startup (the `run_in_thread_with_globals`
+  "rustc" compilation thread, even with `-Zthreads=1`; rayon pool + jobserver
+  helper in the parallel build). `wasi_thread_start` must run it somewhere.
+- **Inline** (bjorn3 demo pattern — same instance, same thread): valid programs
+  complete; **buggy programs hang** — the spawned thread parks in a futex
+  (`memory.atomic.wait32`; verified from rust 1.79 `library/std/src/pal/wasm/
+  atomics/futex.rs`) and the main thread is blocked inside the spawn call, so
+  the wake-up can never happen. Hang = 0 CPU, stable memory (true suspension).
+- **Worker-thread + separate instance**: blocked — the trampoline uses
+  `call_indirect` on runtime-populated table slots; a second instance has a
+  different table → "null function". Sharing the table is impossible in
+  shipping V8: shared funcref tables unsupported; Node 24 even forbids the
+  combination (shared table import needs `--experimental-wasm-shared`, which
+  then forbids shared memory). `WebAssembly.Instance` is NOT transferable
+  (checked in Node), so the emscripten "transfer the instance" model is out.
+- V8 releases the SAB exclusive lock while a thread is suspended in
+  `atomic.wait` (validated with `scripts/sablock-test.mjs`) — so cross-thread
+  memory access itself is fine; the table is the wall, not the memory.
+
+**Current status (Node, this machine):**
+- Valid code: reliable (hello 3/3 exit 0).
+- Buggy code (mut/move/lifetime): **hangs deterministically here** — the
+  compilation thread parks mid-front-end; heartbeat detects it (15 s stale) →
+  terminate → retry ×3 → gives up with exit -998. In one perturbed run (disk
+  I/O churn in the syscall path) `mut` completed in 0.5 s with a real
+  `error[E0594]` diagnostic — the underlying flow CAN work; it's a futex
+  race whose coin is currently landing on "park". Browser (real dedicated
+  Worker, different V8/scheduling) is the next test; the architecture
+  (runner worker + heartbeat + retry + MC fallback) degrades safely either way.
+
+**Open items to make buggy cases reliable:**
+1. Browser test of the same flow (spike page) — scheduling may differ enough.
+2. Bounded-futex patch: replace indefinite `atomic.wait32` with short-timeout
+   waits so parking-lot re-checks self-heal lost wake-ups. The timeout is a
+   runtime stack value (no `i64.const -1` + `fe 01` pattern exists to patch —
+   0 hits across 841 wait32 sites), so this needs per-site code injection with
+   branch-delta fixups — a proper wasm rewriter job, not a byte swap.
+3. Or: build a tiny custom rustc shim that only runs the front end
+   (`--emit=metadata`-ish) — same park problem observed, so unlikely to help.
+
 ## To do ⏭️
 
-### v0.3 — rustc-wasm sandbox (next up, the killer feature)
+### v0.3 — rustc-wasm sandbox (spike done — see above; next: make buggy cases reliable)
 Turn "Fix the Bug" from multiple-choice into **type real Rust, it compiles**:
-1. Add `@rustwasm/...` (rustc compiled to WASM, the engine behind rust Playground) as a Vite asset; lazy-load it (big — keep it out of the critical bundle; expect ~10–20 MB)
+1. rustc asset = `bjorn3/wasm-rustc` (official playground build is dead); lazy-load the 81 MB wasm out of the critical bundle
 2. New `CodeEditor` component: plain `<textarea>` first (monospace, syntax-colored overlay is a nice-to-have, NOT a blocker)
 3. New run phase `sandbox`: show broken code + error → user edits → "⚡ Compile" → real rustc output in the terminal box
 4. Pass condition: compiles clean AND (stretch) passes embedded `#[test]` asserts

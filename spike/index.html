@@ -1,0 +1,162 @@
+<!DOCTYPE html>
+<html lang="en">
+  <head>
+    <meta charset="UTF-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+    <title>rustc-wasm spike 🦀</title>
+    <style>
+      :root {
+        --bg: #0b0e1a;
+        --panel: #131830;
+        --neon: #00e5ff;
+        --mag: #ff2ec4;
+        --ok: #3dff8b;
+        --err: #ff5c5c;
+        --dim: #8b93b8;
+      }
+      * { box-sizing: border-box; }
+      body {
+        margin: 0;
+        background: var(--bg);
+        color: #e8ecff;
+        font-family: 'Cascadia Code', 'Fira Code', Consolas, monospace;
+        display: flex;
+        justify-content: center;
+        padding: 24px 16px;
+      }
+      #app { width: 100%; max-width: 980px; }
+      h1 {
+        font-size: 20px;
+        margin: 0 0 4px;
+        color: var(--neon);
+        text-shadow: 0 0 12px rgba(0, 229, 255, 0.6);
+      }
+      .sub { color: var(--dim); font-size: 12px; margin-bottom: 16px; }
+      .panel {
+        background: var(--panel);
+        border: 1px solid #232b52;
+        border-radius: 8px;
+        padding: 14px;
+        margin-bottom: 14px;
+      }
+      .status { font-size: 13px; margin-bottom: 8px; min-height: 18px; }
+      .status .ok { color: var(--ok); }
+      .status .err { color: var(--err); }
+      .status .warn { color: #ffd75c; }
+      .bar {
+        height: 10px;
+        background: #0a0d1c;
+        border-radius: 5px;
+        overflow: hidden;
+        margin: 6px 0 2px;
+      }
+      .bar > div {
+        height: 100%;
+        width: 0%;
+        background: linear-gradient(90deg, var(--neon), var(--mag));
+        transition: width 0.2s;
+      }
+      .barlabel { font-size: 11px; color: var(--dim); display: flex; justify-content: space-between; }
+      textarea {
+        width: 100%;
+        min-height: 180px;
+        background: #0a0d1c;
+        color: #e8ecff;
+        border: 1px solid #232b52;
+        border-radius: 6px;
+        font: inherit;
+        font-size: 13px;
+        padding: 10px;
+        resize: vertical;
+        tab-size: 4;
+      }
+      textarea:focus { outline: none; border-color: var(--neon); }
+      .row { display: flex; gap: 8px; flex-wrap: wrap; margin-top: 10px; align-items: center; }
+      button {
+        font: inherit;
+        font-size: 12px;
+        background: #1a2145;
+        color: #e8ecff;
+        border: 1px solid #2c366b;
+        border-radius: 6px;
+        padding: 8px 14px;
+        cursor: pointer;
+      }
+      button:hover:not(:disabled) { border-color: var(--neon); color: var(--neon); }
+      button:disabled { opacity: 0.4; cursor: not-allowed; }
+      button.primary {
+        background: linear-gradient(90deg, rgba(0,229,255,.2), rgba(255,46,196,.2));
+        border-color: var(--neon);
+        color: var(--neon);
+        font-weight: bold;
+      }
+      button.primary:hover:not(:disabled) { box-shadow: 0 0 14px rgba(0, 229, 255, 0.35); }
+      button.case { font-size: 11px; padding: 6px 10px; }
+      button.case.active { border-color: var(--mag); color: var(--mag); }
+      select {
+        font: inherit; font-size: 12px;
+        background: #0a0d1c; color: #e8ecff;
+        border: 1px solid #2c366b; border-radius: 6px; padding: 7px 10px;
+      }
+      #terminal {
+        background: #060812;
+        border: 1px solid #232b52;
+        border-radius: 6px;
+        padding: 12px;
+        min-height: 140px;
+        max-height: 420px;
+        overflow: auto;
+        font-size: 12.5px;
+        line-height: 1.5;
+        white-space: pre-wrap;
+        word-break: break-word;
+      }
+      #terminal .out { color: #c9d4ff; }
+      #terminal .err { color: var(--err); }
+      #terminal .sys { color: var(--dim); }
+      #terminal .ok { color: var(--ok); }
+      .metrics { display: flex; gap: 18px; flex-wrap: wrap; font-size: 11px; color: var(--dim); margin-top: 8px; }
+      .metrics b { color: var(--neon); font-weight: normal; }
+      label { font-size: 11px; color: var(--dim); margin-right: 4px; }
+    </style>
+  </head>
+  <body>
+    <div id="app">
+      <h1>⚡ rustc-wasm spike</h1>
+      <div class="sub">
+        real rustc (1.79.0-dev, wasm32-wasip1-threads) in the browser · bjorn3/wasm-rustc + @bjorn3/browser_wasi_shim
+      </div>
+
+      <div class="panel">
+        <div class="status" id="status">checking…</div>
+        <div class="bar"><div id="bar-wasm"></div></div>
+        <div class="barlabel"><span>rustc.wasm (81MB)</span><span id="pct-wasm"></span></div>
+        <div class="bar"><div id="bar-libs"></div></div>
+        <div class="barlabel"><span>std rlibs (98MB)</span><span id="pct-libs"></span></div>
+        <div class="metrics" id="metrics"></div>
+      </div>
+
+      <div class="panel">
+        <div class="row">
+          <button class="case" data-case="hello">💡 hello</button>
+          <button class="case" data-case="mut">🔧 mut (E0594)</button>
+          <button class="case" data-case="move">📦 move (E0382)</button>
+          <button class="case" data-case="lifetime">⏳ lifetime (E0106)</button>
+          <span style="flex:1"></span>
+          <label>mode</label>
+          <select id="mode">
+            <option value="metadata">type-check only (--emit=metadata)</option>
+            <option value="lib">full codegen (--crate-type=lib)</option>
+          </select>
+          <button class="primary" id="compile" disabled>⚡ Compile</button>
+        </div>
+        <textarea id="code" spellcheck="false" style="margin-top:10px"></textarea>
+      </div>
+
+      <div class="panel">
+        <div id="terminal"></div>
+      </div>
+    </div>
+    <script type="module" src="/spike/main.ts"></script>
+  </body>
+</html>

@@ -2,3 +2,7 @@ node_modules/
 dist/
 *.log
 .DS_Store
+
+# in-browser rustc spike assets (~175MB, re-download: node scripts/fetch-spike-assets.mjs)
+public/spike/*.wasm
+public/spike/sysroot/
