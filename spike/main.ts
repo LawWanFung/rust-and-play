@@ -7,17 +7,6 @@
 //   /spike/rustc.wasm          81MB compiler
 //   /spike/sysroot/lib/*       98MB x86_64 std (27 files)
 
-import {
-  WASI,
-  WASIProcExit,
-  Fd,
-  File,
-  Directory,
-  PreopenDirectory,
-  strace,
-  type Inode,
-} from '@bjorn3/browser_wasi_shim'
-
 // ---------------------------------------------------------------- DOM
 
 const $ = <T extends Element = Element>(sel: string) =>
@@ -31,7 +20,6 @@ const pctLibs = $<HTMLSpanElement>('#pct-libs')
 const metricsEl = $<HTMLDivElement>('#metrics')
 const codeEl = $<HTMLTextAreaElement>('#code')
 const compileBtn = $<HTMLButtonElement>('#compile')
-const modeEl = $<HTMLSelectElement>('#mode')
 const terminalEl = $<HTMLDivElement>('#terminal')
 
 function setStatus(html: string) {
@@ -108,44 +96,90 @@ const RLIBS = [
 
 // ---------------------------------------------------------------- output fd
 
-/** WASI fd that appends everything written to it into the terminal. */
-class TerminalFd extends Fd {
-  private buf: number[] = []
-  constructor(private cls: string) {
-    super()
-  }
-  fd_write(data: Uint8Array): { ret: number; nwritten: number } {
-    for (let i = 0; i < data.length; i++) this.buf.push(data[i])
-    // flush on line boundaries so multi-chunk writes stay readable
-    const text = new TextDecoder().decode(new Uint8Array(this.buf))
-    if (text.includes('\n') || this.buf.length > 2048) {
-      termWrite(text, this.cls)
-      this.buf = []
-    }
-    return { ret: 0, nwritten: data.length }
-  }
-  flush() {
-    if (this.buf.length) {
-      termWrite(new TextDecoder().decode(new Uint8Array(this.buf)), this.cls)
-      this.buf = []
-    }
-  }
+// ---------------------------------------------------------------- rustc (runner worker)
+
+interface LibAsset {
+  name: string
+  data: ArrayBuffer
+}
+interface RustcAssets {
+  wasmBytes: ArrayBuffer
+  libs: LibAsset[]
 }
 
-// ---------------------------------------------------------------- rustc
+let rustc: RustcAssets | null = null
+let running = false
+const STALE_MS = 15000
+const MAX_ATTEMPTS = 3
 
-interface Rustc {
-  module: WebAssembly.Module
-  sysroot: Directory
-  workDir: Directory
+/** One rustc run on a dedicated worker; heartbeat + terminate + retry. */
+function runRustc(r: RustcAssets, args: string[], source: string): Promise<{ code: number; out: string; err: string }> {
+  return new Promise((resolve, reject) => {
+    let worker: Worker | null = null
+    let poll: number | undefined
+    let settled = false
+    const done = (v: { code: number; out: string; err: string }) => {
+      if (settled) return
+      settled = true
+      if (poll) window.clearInterval(poll)
+      worker?.terminate()
+      resolve(v)
+    }
+    const fail = (e: unknown) => {
+      if (settled) return
+      settled = true
+      if (poll) window.clearInterval(poll)
+      worker?.terminate()
+      reject(e)
+    }
+
+    let attempt = 0
+    const startAttempt = () => {
+      attempt++
+      try {
+        worker = new Worker(new URL('./runner-worker.ts', import.meta.url), { type: 'module' })
+      } catch (e) {
+        fail(e)
+        return
+      }
+      const heartbeat = new SharedArrayBuffer(8)
+      new DataView(heartbeat).setBigInt64(0, BigInt(Date.now()), true)
+      worker.onmessage = (ev) => {
+        const m = ev.data as { kind: string; code?: number; out?: string; err?: string; label?: string }
+        if (m.kind === 'progress') setStatus(`⚙ ${m.label ?? ''}`)
+        if (m.kind === 'result') done({ code: m.code!, out: m.out!, err: m.err! })
+      }
+      worker.onerror = (e) => {
+        // a wedged worker (futex park) never posts — the heartbeat poll
+        // terminates it; an immediate error here is a boot failure
+        if (poll && Date.now() - hbLast() < STALE_MS) fail(new Error(e.message || 'worker error'))
+      }
+      const hb = new DataView(heartbeat)
+      const hbLast = () => Number(hb.getBigInt64(0, true))
+      poll = window.setInterval(() => {
+        if (Date.now() - hbLast() > STALE_MS) {
+          window.clearInterval(poll)
+          poll = undefined
+          worker?.terminate()
+          worker = null
+          if (attempt < MAX_ATTEMPTS) {
+            termLine(`↻ runner wedged (no syscall activity ${STALE_MS / 1000}s) — retry ${attempt + 1}/${MAX_ATTEMPTS}`, 'sys')
+            startAttempt()
+          } else {
+            done({ code: -998, out: '', err: `sandbox hung ${MAX_ATTEMPTS} times; giving up` })
+          }
+        }
+      }, 500)
+      worker.postMessage(
+        { kind: 'run', source, wasmBytes: r.wasmBytes, libs: r.libs, heartbeat, args },
+        [r.wasmBytes, ...r.libs.map((l) => l.data), heartbeat],
+      )
+    }
+    startAttempt()
+  })
 }
 
-let rustc: Rustc | null = null
-
-async function fetchWithProgress(
-  url: string,
-  onPct: (pct: number) => void,
-): Promise<ArrayBuffer> {
+async function fetchWithProgress(url: string, onPct: (pct: number) => void): Promise<ArrayBuffer> {
   const res = await fetch(url)
   if (!res.ok) throw new Error(`${url} → HTTP ${res.status}`)
   const total = Number(res.headers.get('content-length') ?? 0)
@@ -156,6 +190,7 @@ async function fetchWithProgress(
   for (;;) {
     const { done, value } = await reader.read()
     if (done) break
+    if (!value) continue
     chunks.push(value)
     got += value.length
     if (total) onPct((got / total) * 100)
@@ -169,63 +204,22 @@ async function fetchWithProgress(
   return out.buffer
 }
 
-/** Spawn a fresh rustc process (one WASI instance per invocation). */
-async function runRustc(r: Rustc, args: string[], trace = false): Promise<number> {
-  const stdout = new TerminalFd('out')
-  const stderr = new TerminalFd('err')
-  const w = new WASI(args, [], [
-    new TerminalFd('sys'),
-    stdout,
-    stderr,
-    new PreopenDirectory('/tmp', new Directory([]).contents),
-    new PreopenDirectory('/sysroot', r.sysroot.contents),
-    new PreopenDirectory('/work', r.workDir.contents),
-    new PreopenDirectory('/', new Directory([]).contents),
-  ], { debug: false })
-  let nextThreadId = 1
-  const inst: any = await WebAssembly.instantiate(r.module, {
-    env: {
-      memory: new WebAssembly.Memory({ initial: 256, maximum: 16384, shared: true }),
-    },
-    wasi: {
-      'thread-spawn': (startArg: number) => {
-        const id = nextThreadId++
-        inst.exports.wasi_thread_start(id, startArg)
-        return id
-      },
-    },
-    wasi_snapshot_preview1: trace ? strace(w.wasiImport, ['fd_prestat_get']) : w.wasiImport,
-  })
-  w.initialize(inst)
-  try {
-    w.start(inst)
-    return 0
-  } catch (e) {
-    stdout.flush()
-    stderr.flush()
-    if (e instanceof WASIProcExit) return e.code
-    throw e
-  }
-}
-
 async function loadRustc() {
   const t0 = performance.now()
 
   setStatus('⬇ downloading <span class="ok">rustc.wasm</span> (81MB)…')
-  const wasmBytes = new Uint8Array(
-    await fetchWithProgress('/spike/rustc.wasm', (pct) => {
-      barWasm.style.width = pct.toFixed(1) + '%'
-      pctWasm.textContent = pct.toFixed(0) + '%'
-    }),
-  )
+  const wasmBytes = await fetchWithProgress('/spike/rustc.wasm', (pct) => {
+    barWasm.style.width = pct.toFixed(1) + '%'
+    pctWasm.textContent = pct.toFixed(0) + '%'
+  })
   addMetric('wasm download', performance.now() - t0)
 
   setStatus('⬇ downloading <span class="ok">std rlibs</span> (27 files, 98MB)…')
   const t1 = performance.now()
-  const libContents: [string, Inode][] = []
+  const libs: LibAsset[] = []
   let doneCount = 0
   const queue = [...RLIBS]
-  async function worker() {
+  async function dlWorker() {
     for (;;) {
       const name = queue.shift()
       if (!name) return
@@ -235,41 +229,23 @@ async function loadRustc() {
           `missing /spike/sysroot/lib/.../${name} (HTTP ${res.status}) — run: node scripts/fetch-spike-assets.mjs`,
         )
       }
-      libContents.push([name, new File(new Uint8Array(await res.arrayBuffer()))])
+      libs.push({ name, data: await res.arrayBuffer() })
       doneCount++
       barLibs.style.width = ((doneCount / RLIBS.length) * 100).toFixed(1) + '%'
       pctLibs.textContent = `${doneCount}/${RLIBS.length}`
     }
   }
-  await Promise.all(Array.from({ length: 6 }, worker))
+  await Promise.all(Array.from({ length: 6 }, dlWorker))
   addMetric('rlibs download', performance.now() - t1)
 
-  setStatus('⚙ compiling wasm module (81MB)…')
+  rustc = { wasmBytes, libs }
+
+  // identity check: rustc --version through the runner worker
   const t2 = performance.now()
-  const module = await WebAssembly.compile(wasmBytes.buffer as ArrayBuffer)
-  addMetric('wasm compile', performance.now() - t2)
-
-  const sysroot = new Directory([
-    [
-      'lib',
-      new Directory([
-        [
-          'rustlib',
-          new Directory([
-            ['x86_64-unknown-linux-gnu', new Directory([['lib', new Directory(libContents)]])],
-          ] as [string, Inode][]),
-        ],
-      ] as [string, Inode][]),
-    ],
-  ] as [string, Inode][])
-
-  rustc = { module, sysroot, workDir: new Directory([['main.rs', new File(new TextEncoder().encode(CASES.hello))]]) }
-
-  // identity check
-  const t3 = performance.now()
-  const versionExit = await runRustc(rustc, ['rustc', '--version'], true)
-  addMetric('first run (--version)', performance.now() - t3)
-  if (versionExit !== 0) throw new Error(`rustc --version exited ${versionExit}`)
+  terminalEl.innerHTML = ''
+  const v = await runRustc(rustc, ['rustc', '--version'], '')
+  addMetric('first run (--version)', performance.now() - t2)
+  termWrite((v.out || v.err || 'rustc --version failed').trim() + String.fromCharCode(10), 'ok')
 
   setStatus('<span class="ok">✓ rustc ready</span> — pick a case, hit ⚡ Compile')
   compileBtn.disabled = false
@@ -278,34 +254,34 @@ async function loadRustc() {
 // ---------------------------------------------------------------- compile
 
 compileBtn.addEventListener('click', async () => {
-  if (!rustc) return
+  if (!rustc || running) return
+  running = true
   compileBtn.disabled = true
   terminalEl.innerHTML = ''
 
-  rustc.workDir.contents.set('main.rs', new File(new TextEncoder().encode(codeEl.value)))
-
-  const mode = modeEl.value
   const args = [
     'rustc',
     '/work/main.rs',
     '--sysroot', '/sysroot',
     '--target', 'x86_64-unknown-linux-gnu',
-    '-Cpanic=abort',
     '-Ccodegen-units=1',
-    ...(mode === 'metadata' ? ['--emit=metadata'] : ['--crate-type=lib']),
+    '-Zthreads=1',
   ]
 
   termLine(`$ ${args.join(' ')}`, 'sys')
   const t0 = performance.now()
   try {
-    const exit = await runRustc(rustc, args)
+    const r = await runRustc(rustc, args, codeEl.value)
     const dt = (performance.now() - t0) / 1000
+    if (r.out) termWrite(r.out, 'out')
+    if (r.err) termWrite(r.err, r.code === 0 ? 'out' : 'err')
     termLine('')
-    if (exit === 0) termLine(`✓ compiled clean in ${dt.toFixed(1)}s`, 'ok')
-    else termLine(`✗ rustc exited with code ${exit} after ${dt.toFixed(1)}s`, 'err')
+    if (r.code === 0) termLine(`✓ compiled clean in ${dt.toFixed(1)}s`, 'ok')
+    else termLine(`✗ rustc exited with code ${r.code} after ${dt.toFixed(1)}s`, 'err')
   } catch (e) {
     termLine(`✗ ${e}`, 'err')
   }
+  running = false
   compileBtn.disabled = false
 })
 
