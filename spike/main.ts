@@ -77,6 +77,7 @@ function runRustc(args: string[], source: string): Promise<{ code: number; out: 
     let worker: Worker | null = null
     let poll: number | undefined
     let settled = false
+    let streamed = '' // partial output captured from the worker (survives terminate)
     const done = (v: { code: number; out: string; err: string }) => {
       if (settled) return
       settled = true
@@ -106,7 +107,10 @@ function runRustc(args: string[], source: string): Promise<{ code: number; out: 
       worker.onmessage = (ev) => {
         const m = ev.data as { kind: string; code?: number; out?: string; err?: string; label?: string; stream?: string; text?: string }
         if (m.kind === 'progress') setStatus(`⚙ ${m.label ?? ''}`)
-        if (m.kind === 'chunk' && m.text) termWrite(m.text, m.stream === 'err' ? 'err' : 'out')
+        if (m.kind === 'chunk' && m.text) {
+          streamed += m.text
+          termWrite(m.text, m.stream === 'err' ? 'err' : 'out')
+        }
         if (m.kind === 'result') done({ code: m.code!, out: m.out!, err: m.err! })
       }
       worker.onerror = (e) => {
@@ -122,7 +126,14 @@ function runRustc(args: string[], source: string): Promise<{ code: number; out: 
           poll = undefined
           worker?.terminate()
           worker = null
-          if (attempt < MAX_ATTEMPTS) {
+          // The process wedged, but rustc may have already emitted its real
+          // diagnostics before parking (the park happens at shutdown, after
+          // all errors are printed). If we captured diagnostics, that IS the
+          // educational payload — return it instead of a blank failure.
+          const hasDiagnostics = /error\[E\d+\]|warning:/.test(streamed)
+          if (hasDiagnostics) {
+            done({ code: 1, out: '', err: streamed + String.fromCharCode(10) + 'note: rustc parked at shutdown; diagnostics above are complete' + String.fromCharCode(10) })
+          } else if (attempt < MAX_ATTEMPTS) {
             termLine(`↻ runner wedged (no syscall activity ${STALE_MS / 1000}s) — retry ${attempt + 1}/${MAX_ATTEMPTS}`, 'sys')
             startAttempt()
           } else {
