@@ -109,11 +109,19 @@ interface Warm {
   sysroot: Directory
 }
 let warm: Warm | null = null
+let warmPromise: Promise<Warm> | null = null
 let currentId = 0
 let busy = false
 
 async function ensureWarm(): Promise<Warm> {
   if (warm) return warm
+  // memoize: a run arriving mid-fetch must reuse the in-flight download,
+  // never start a second 180 MB fetch
+  if (!warmPromise) warmPromise = doEnsureWarm()
+  return warmPromise
+}
+
+async function doEnsureWarm(): Promise<Warm> {
   post({ kind: 'progress', id: currentId, pct: 5, label: 'fetching std libraries (27 files, ~98 MB)' })
   void currentId
   const libContents: [string, Inode][] = []
