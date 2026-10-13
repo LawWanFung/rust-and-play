@@ -62,7 +62,11 @@ export function Run({ moduleId, isBoss, save, onExit }: Props) {
     // (makes it instant to reach e.g. fix-the-bug rounds while testing)
     const forced = new URLSearchParams(location.search).get('debug') as Question['mode'] | null
     if (forced && ['quiz', 'predict', 'fix', 'match'].includes(forced)) {
-      bank = bank.filter((q) => q.mode === forced)
+      const filtered = bank.filter((q) => q.mode === forced)
+      // cycle the (small) mode bank so the run still has full length
+      const need = isBoss ? BOSS_LENGTH : RUN_LENGTH
+      while (filtered.length < need) filtered.push(...filtered)
+      bank = filtered
     }
     return stratifiedPick(bank, isBoss ? BOSS_LENGTH : RUN_LENGTH)
     // eslint-disable-next-line react-hooks/exhaustive-deps
