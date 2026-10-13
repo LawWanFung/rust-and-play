@@ -2,6 +2,7 @@ import { useEffect, useMemo, useRef, useState } from 'react'
 import type { Badge } from '../game/ranks'
 import { badgeById, nextRank, rankFor } from '../game/ranks'
 import type { ModuleProgress, SaveData } from '../game/store'
+import type { Question } from '../game/types'
 import { loadSave, persistSave } from '../game/store'
 import {
   BOSS_LENGTH,
@@ -56,6 +57,12 @@ export function Run({ moduleId, isBoss, save, onExit }: Props) {
           bank = [...bank, ...pick(m.questions, 2)]
         }
       }
+    }
+    // dev deep-link: ?debug=fix|quiz|predict|match forces a single mode
+    // (makes it instant to reach e.g. fix-the-bug rounds while testing)
+    const forced = new URLSearchParams(location.search).get('debug') as Question['mode'] | null
+    if (forced && ['quiz', 'predict', 'fix', 'match'].includes(forced)) {
+      bank = bank.filter((q) => q.mode === forced)
     }
     return stratifiedPick(bank, isBoss ? BOSS_LENGTH : RUN_LENGTH)
     // eslint-disable-next-line react-hooks/exhaustive-deps
