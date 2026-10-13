@@ -34,6 +34,7 @@ class SandboxClient {
   private hb: SharedArrayBuffer | null = null
   private hbView: DataView | null = null
   private poll: number | undefined
+  private runSlot: { chunk: (s: StreamKind, t: string) => void; result: (c: number, o: string, e: string) => void } | null = null
   private runSeq = 0
   private listeners = new Set<(s: SandboxState) => void>()
 
@@ -63,9 +64,9 @@ class SandboxClient {
     }
     this.setState('loading')
     this.ensureWorker()
-    // `rustc --version` doubles as the readiness probe; its result flips
-    // the state to ready
-    this.postRun('fn main() {}', ['rustc', '--version'], () => {})
+    // readiness = assets fetched + module compiled (worker posts 'ready').
+    // No probe run: a parked run must never wedge the ready state.
+    this.worker?.postMessage({ kind: 'warm' })
   }
 
   private queue: Promise<unknown> = Promise.resolve()
@@ -121,25 +122,31 @@ class SandboxClient {
         out?: string
         err?: string
       }
-      if (m.kind === 'progress') this.onProgress(m)
-      if (m.kind === 'result') this.onResult(m)
+      switch (m.kind) {
+        case 'ready':
+          if (this.state !== 'failed') this.setState('ready')
+          break
+        case 'failed':
+          this.setState('failed')
+          break
+        case 'progress':
+          if (this.state === 'loading' && (m.pct ?? 0) >= 100) this.setState('ready')
+          break
+        case 'chunk':
+          this.runSlot?.chunk(m.stream ?? 'out', m.text ?? '')
+          break
+        case 'result':
+          this.runSlot?.result(m.code ?? -998, m.out ?? '', m.err ?? '')
+          this.runSlot = null
+          break
+      }
     }
     this.worker.onerror = (e) => {
       console.error('sandbox worker error', e.message)
       this.setState('failed')
-      this.settleLate({ code: -998, out: '', err: e.message || 'worker error', hung: false })
+      this.runSlot?.result(-998, '', e.message || 'worker error')
+      this.runSlot = null
     }
-  }
-
-  private onProgress(m: { id?: number; pct?: number; label?: string }) {
-    // the warmup/--version run finishing means the sandbox is ready
-    if (this.state === 'loading' && (m.pct ?? 0) >= 100) this.setState('ready')
-  }
-
-  private onResult(m: { code?: number; out?: string; err?: string }) {
-    if (this.state === 'loading') this.setState('ready')
-    this.stopPoll()
-    this.settleLate({ code: m.code ?? -998, out: m.out ?? '', err: m.err ?? '', hung: false })
   }
 
   private postRun(source: string, args: string[], onChunk: ChunkHandler): Promise<CompileResult> {
@@ -174,17 +181,13 @@ class SandboxClient {
       const startAttempt = () => {
         attempt++
         view.setBigInt64(0, BigInt(Date.now()), true)
-        worker.onmessage = (ev) => {
-          const m = ev.data as { kind: string; id?: number; stream?: StreamKind; text?: string; code?: number; out?: string; err?: string }
-          if (m.id !== id) return
-          if (m.kind === 'chunk' && m.text) freshHandler(m.stream ?? 'out', m.text)
-          if (m.kind === 'result') {
-            if (this.state === 'loading') this.setState('ready')
-            done({ code: m.code ?? -998, out: m.out ?? '', err: m.err ?? '', hung: false })
-          }
-        }
-        worker.onerror = (e) => {
-          done({ code: -998, out: streamed, err: e.message || 'worker error', hung: false })
+        this.runSlot = {
+          chunk: (stream, text) => {
+            if (text) freshHandler(stream, text)
+          },
+          result: (code, out, err) => {
+            done({ code, out, err, hung: false })
+          },
         }
         // NO transfer list: a SharedArrayBuffer cannot be transferred — it
         // is shared by reference by design.
@@ -240,9 +243,6 @@ class SandboxClient {
     this.poll = undefined
   }
 
-  private settleLate(_r: CompileResult) {
-    // worker-level result for runs not tracked by postRun (e.g. warmup)
-  }
 }
 
 function defaultArgs(): string[] {

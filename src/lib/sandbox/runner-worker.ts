@@ -66,6 +66,10 @@ interface RunMsg {
   heartbeat: ArrayBuffer
   args: string[]
 }
+interface WarmMsg {
+  kind: 'warm'
+}
+type Msg = RunMsg | WarmMsg
 
 const RLIBS = [
   'libaddr2line-b8754aeb03c02354.rlib',
@@ -111,6 +115,7 @@ let busy = false
 async function ensureWarm(): Promise<Warm> {
   if (warm) return warm
   post({ kind: 'progress', id: currentId, pct: 5, label: 'fetching std libraries (27 files, ~98 MB)' })
+  void currentId
   const libContents: [string, Inode][] = []
   for (let i = 0; i < RLIBS.length; i++) {
     const name = RLIBS[i]
@@ -146,7 +151,18 @@ async function ensureWarm(): Promise<Warm> {
 // ---------------------------------------------------------------- run
 
 self.onmessage = async (ev: MessageEvent) => {
-  const msg = ev.data as RunMsg
+  const msg = ev.data as Msg
+  if (msg.kind === 'warm') {
+    // readiness = assets fetched + module compiled. No `w.start` here —
+    // a parked warmup run must never be able to wedge the ready state.
+    try {
+      await ensureWarm()
+      post({ kind: 'ready' })
+    } catch (e) {
+      post({ kind: 'failed', err: String(e) })
+    }
+    return
+  }
   if (msg.kind !== 'run' || busy) return
   busy = true
   currentId = msg.id
