@@ -1,7 +1,7 @@
 # PROGRESS — RustQuest 🦀🎮
 
 Living log of where this project stands. Read this first when resuming work.
-Last updated: after v0.2, pushed to github.com/LawWanFung/rust-and-play (commit `1ed1b6b`).
+Last updated: v0.3 spike **validated in the browser** (real rustc diagnostics in-page; commits up to `a958c94`).
 
 ## What this is
 
@@ -82,26 +82,32 @@ the official static.rust-lang.org playground build is dead (404).
   `atomic.wait` (validated with `scripts/sablock-test.mjs`) — so cross-thread
   memory access itself is fine; the table is the wall, not the memory.
 
-**Current status (Node, this machine):**
-- Valid code: reliable (hello 3/3 exit 0).
-- Buggy code (mut/move/lifetime): **hangs deterministically here** — the
-  compilation thread parks mid-front-end; heartbeat detects it (15 s stale) →
-  terminate → retry ×3 → gives up with exit -998. In one perturbed run (disk
-  I/O churn in the syscall path) `mut` completed in 0.5 s with a real
-  `error[E0594]` diagnostic — the underlying flow CAN work; it's a futex
-  race whose coin is currently landing on "park". Browser (real dedicated
-  Worker, different V8/scheduling) is the next test; the architecture
-  (runner worker + heartbeat + retry + MC fallback) degrades safely either way.
+**Status: VALIDATED IN THE BROWSER ✅ (the make-or-break passed)**
+- Valid code: `hello` compiles clean in ~2 s (thread spawn works; the
+  post-link `cc` failure is tolerated; `unreachable` abort silenced).
+- Buggy code: `mut` produced a **complete real rustc diagnostic**
+  (E0596 with caret, `help:` suggestion, `--explain` pointer) in ~15 s.
+  The shutdown futex-park still happens, but the park is at shutdown
+  — *after* all diagnostics are printed — so **completion-by-output-
+  inspection** (streamed output contains `error[E…]`/`warning:` when the
+  heartbeat goes stale → return it as the result) turns the hang into a
+  contained ~15 s wait with the full educational payload on screen.
+- The spawned-thread park race itself (0-CPU futex suspension, no
+  lost-wakeup recovery in this V8) remains a known limitation; a
+  definitive fix needs a wasm rewriter that bounds every futex wait.
+  Not blocking: diagnostics are always delivered.
 
-**Open items to make buggy cases reliable:**
-1. Browser test of the same flow (spike page) — scheduling may differ enough.
-2. Bounded-futex patch: replace indefinite `atomic.wait32` with short-timeout
-   waits so parking-lot re-checks self-heal lost wake-ups. The timeout is a
-   runtime stack value (no `i64.const -1` + `fe 01` pattern exists to patch —
-   0 hits across 841 wait32 sites), so this needs per-site code injection with
-   branch-delta fixups — a proper wasm rewriter job, not a byte swap.
-3. Or: build a tiny custom rustc shim that only runs the front end
-   (`--emit=metadata`-ish) — same park problem observed, so unlikely to help.
+**Node harness** (scripts/spike-node.mjs): same story — hello 3/3 exit 0;
+buggy cases contained by heartbeat/retry. Browser is the target runtime.
+
+**Open items (non-blocking):**
+1. Bounded-futex wasm rewriter (per-site timeout injection with
+   branch-delta fixups) to kill the shutdown park entirely — would cut
+   buggy-case latency from ~15 s to ~2 s. Nice-to-have, not a gate.
+2. Tune STALE_MS (15 s → ~8 s) for snappier wedged-run resolution.
+3. **The real next step: game integration** — `CodeEditor` (textarea),
+   sandbox run phase on fix questions, MC fallback if the worker never
+   reports ready (offline / COEP failure).
 
 ## To do ⏭️
 
