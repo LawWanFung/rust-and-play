@@ -2,13 +2,18 @@
 // Runs one rustc invocation on this dedicated Worker thread. The page
 // (main thread) stays responsive; a SharedArrayBuffer heartbeat (stamped on
 // every WASI import call) lets the page detect a wedged run (futex park)
-// and terminate + retry.
+// and terminate + retry. Output is streamed to the page live, so even a
+// wedged/terminated run leaves its diagnostics on screen.
 //
-// Message protocol (page -> worker):
-//   { kind: 'run', source, wasmBytes, libs: {name, data}[], heartbeat, args }
-// (worker -> page):
-//   { kind: 'progress', pct, label }
-//   { kind: 'result', code, out, err }
+// Message protocol:
+//   page -> worker: { kind: 'run', source, heartbeat, args }
+//                    (NO transfer list: a SharedArrayBuffer cannot be
+//                     transferred — it is shared by reference by design —
+//                     and the worker fetches its own assets so the page
+//                     keeps no 180MB state for retries)
+//   worker -> page: { kind: 'progress', pct, label }
+//                    { kind: 'chunk', stream, text }
+//                    { kind: 'result', code, out, err }
 import {
   WASI,
   WASIProcExit,
@@ -19,30 +24,39 @@ import {
   type Inode,
 } from '@bjorn3/browser_wasi_shim'
 
-/** WASI fd that accumulates everything written to it. */
+const NL = String.fromCharCode(10)
+
+/** WASI fd that records everything written to it AND streams it to the
+ *  page on line boundaries. */
 class Cap extends Fd {
-  private chunks: Uint8Array[] = []
+  private data = new Uint8Array(0)
+  private flushed = 0
+  constructor(private stream: 'out' | 'err' | 'sys') {
+    super()
+  }
   fd_write(d: Uint8Array): { ret: number; nwritten: number } {
-    this.chunks.push(new Uint8Array(d))
+    const next = new Uint8Array(this.data.length + d.length)
+    next.set(this.data)
+    next.set(d, this.data.length)
+    this.data = next
+    const fresh = new TextDecoder().decode(this.data.subarray(this.flushed))
+    if (fresh.includes(NL) || this.data.length - this.flushed > 4096) {
+      this.flushed = this.data.length
+      post({ kind: 'chunk', stream: this.stream, text: fresh })
+    }
     return { ret: 0, nwritten: d.length }
   }
+  /** Flush any remainder to the page; return the full captured output. */
   text(): string {
-    const n = this.chunks.reduce((a, c) => a + c.length, 0)
-    const all = new Uint8Array(n)
-    let o = 0
-    for (const c of this.chunks) {
-      all.set(c, o)
-      o += c.length
+    const fresh = new TextDecoder().decode(this.data.subarray(this.flushed))
+    if (fresh) {
+      this.flushed = this.data.length
+      post({ kind: 'chunk', stream: this.stream, text: fresh })
     }
-    return new TextDecoder().decode(all)
+    return new TextDecoder().decode(this.data)
   }
 }
 
-// The worker fetches its own assets (rustc.wasm + std rlibs). The page
-// only sends the run request + a SharedArrayBuffer heartbeat reference —
-// a SAB can NOT be transferred (it is shared by reference by design), and
-// not transferring the 180 MB of assets keeps the page's copies intact for
-// retries (a transferred ArrayBuffer is detached on the sender side).
 interface RunMsg {
   kind: 'run'
   source: string
@@ -50,6 +64,7 @@ interface RunMsg {
   args: string[]
 }
 
+// The worker fetches its own assets (rustc.wasm + std rlibs).
 const RLIBS = [
   'libaddr2line-b8754aeb03c02354.rlib',
   'libadler-05c3545f6cd12159.rlib',
@@ -85,7 +100,7 @@ async function fetchLibs(): Promise<[string, Inode][]> {
   const out: [string, Inode][] = []
   for (const name of RLIBS) {
     const res = await fetch(LIB_DIR + name)
-    if (!res.ok) throw new Error(`missing ${LIB_DIR}${name} (HTTP ${res.status})`)
+    if (!res.ok) throw new Error('missing ' + LIB_DIR + name + ' (HTTP ' + res.status + ')')
     out.push([name, new File(new Uint8Array(await res.arrayBuffer()))])
   }
   return out
@@ -109,8 +124,12 @@ self.onmessage = async (ev: MessageEvent) => {
     const libContents = await fetchLibs()
     post({ kind: 'progress', pct: 40, label: 'fetching rustc.wasm (81MB)' })
     const wasmRes = await fetch('/spike/rustc.wasm')
-    if (!wasmRes.ok) throw new Error(`rustc.wasm HTTP ${wasmRes.status}`)
+    if (!wasmRes.ok) throw new Error('rustc.wasm HTTP ' + wasmRes.status)
     const wasmBytes = await wasmRes.arrayBuffer()
+
+    post({ kind: 'progress', pct: 70, label: 'compiling rustc module' })
+    const module = await WebAssembly.compile(wasmBytes)
+
     const sysroot = new Directory([
       [
         'lib',
@@ -126,17 +145,15 @@ self.onmessage = async (ev: MessageEvent) => {
     ])
     const workDir = new Directory([['main.rs', new File(new TextEncoder().encode(msg.source))]])
 
-    post({ kind: 'progress', pct: 70, label: 'compiling rustc module' })
-    const module = await WebAssembly.compile(wasmBytes)
+    post({ kind: 'progress', pct: 80, label: 'instantiating' })
     const memory = new WebAssembly.Memory({ initial: 256, maximum: 16384, shared: true })
-
-    const stdout = new Cap()
-    const stderr = new Cap()
+    const stdout = new Cap('out')
+    const stderr = new Cap('err')
     const w = new WASI(
       msg.args,
       [],
       [
-        new Cap(),
+        new Cap('sys'),
         stdout,
         stderr,
         new PreopenDirectory('/tmp', new Directory([]).contents),
@@ -158,7 +175,6 @@ self.onmessage = async (ev: MessageEvent) => {
     }
 
     let nextThreadId = 1
-    post({ kind: 'progress', pct: 80, label: 'instantiating' })
     const inst = (await WebAssembly.instantiate(module, {
       env: { memory },
       wasi: {
@@ -167,7 +183,10 @@ self.onmessage = async (ev: MessageEvent) => {
         'thread-spawn': (startArg: number) => {
           const id = nextThreadId++
           tick()
-          ;(inst.exports as { wasi_thread_start: (a: number, b: number) => void }).wasi_thread_start(id, startArg)
+          ;(inst.exports as { wasi_thread_start: (a: number, b: number) => void }).wasi_thread_start(
+            id,
+            startArg,
+          )
           return id
         },
       },
@@ -191,18 +210,20 @@ self.onmessage = async (ev: MessageEvent) => {
     }
     tick()
 
-    let err = (crash ? crash + '\n' : '') + stderr.text()
+    let out = stdout.text()
+    let err = (crash ? crash + NL : '') + stderr.text()
     // No `cc` in the sandbox: the final link always fails after all real
-    // diagnostics, then the process aborts (wasm `unreachable`). Expected.
+    // diagnostics, then the process aborts (wasm `unreachable`).
+    // Expected — report a clean success without the crash noise.
     if (
       code === -999 &&
       err.includes('could not exec the linker') &&
       !/error\[E\d+\]/.test(err.split('error: could not exec the linker')[0])
     ) {
       code = 0
-      err = 'note: no linker in sandbox (cc not available) — compilation itself succeeded' + String.fromCharCode(10)
+      err = 'note: no linker in sandbox (cc not available) — compilation itself succeeded' + NL
     }
-    post({ kind: 'result', code, out: stdout.text(), err })
+    post({ kind: 'result', code, out, err })
   } catch (e) {
     post({ kind: 'result', code: -998, out: '', err: String(e) })
   }

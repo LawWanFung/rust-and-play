@@ -104,8 +104,9 @@ function runRustc(args: string[], source: string): Promise<{ code: number; out: 
       const heartbeat = new SharedArrayBuffer(8)
       new DataView(heartbeat).setBigInt64(0, BigInt(Date.now()), true)
       worker.onmessage = (ev) => {
-        const m = ev.data as { kind: string; code?: number; out?: string; err?: string; label?: string }
+        const m = ev.data as { kind: string; code?: number; out?: string; err?: string; label?: string; stream?: string; text?: string }
         if (m.kind === 'progress') setStatus(`⚙ ${m.label ?? ''}`)
+        if (m.kind === 'chunk' && m.text) termWrite(m.text, m.stream === 'err' ? 'err' : 'out')
         if (m.kind === 'result') done({ code: m.code!, out: m.out!, err: m.err! })
       }
       worker.onerror = (e) => {
@@ -149,6 +150,7 @@ async function loadRustc() {
   terminalEl.innerHTML = ''
   const v = await runRustc(['rustc', '--version'], '')
   addMetric('first run (--version)', performance.now() - t2)
+  terminalEl.innerHTML = ''
   termWrite((v.out || v.err || 'rustc --version failed').trim() + String.fromCharCode(10), 'ok')
 
   setStatus('<span class="ok">✓ rustc ready</span> — pick a case, hit ⚡ Compile')
@@ -177,6 +179,8 @@ compileBtn.addEventListener('click', async () => {
   try {
     const r = await runRustc(args, codeEl.value)
     const dt = (performance.now() - t0) / 1000
+    terminalEl.innerHTML = ''
+    termLine(`$ ${args.join(' ')}`, 'sys')
     if (r.out) termWrite(r.out, 'out')
     if (r.err) termWrite(r.err, r.code === 0 ? 'out' : 'err')
     termLine('')
