@@ -59,8 +59,11 @@ export function Run({ moduleId, isBoss, save, onExit }: Props) {
       }
     }
     // dev deep-link: ?debug=fix|quiz|predict|match forces a single mode
-    // (makes it instant to reach e.g. fix-the-bug rounds while testing)
-    const forced = new URLSearchParams(location.search).get('debug') as Question['mode'] | null
+    // (makes it instant to reach e.g. fix-the-bug rounds while testing).
+    // Gated to dev builds — the param is inert in production (SECURITY.md #5).
+    const forced = import.meta.env.DEV
+      ? (new URLSearchParams(location.search).get('debug') as Question['mode'] | null)
+      : null
     if (forced && ['quiz', 'predict', 'fix', 'match'].includes(forced)) {
       const filtered = bank.filter((q) => q.mode === forced)
       // cycle the (small) mode bank so the run still has full length

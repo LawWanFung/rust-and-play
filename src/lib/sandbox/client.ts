@@ -165,6 +165,10 @@ class SandboxClient {
       let attempt = 0
       let poll: number | undefined
 
+      // tail cap (SECURITY.md finding 2): the wedge-recovery decision only
+      // needs the diagnostic tail — never retain an unbounded stream
+      const STREAMED_MAX = 256 * 1024
+
       const done = (r: CompileResult) => {
         if (settled) return
         settled = true
@@ -175,6 +179,7 @@ class SandboxClient {
 
       const freshHandler: ChunkHandler = (stream, text) => {
         streamed += text
+        if (streamed.length > STREAMED_MAX) streamed = streamed.slice(-STREAMED_MAX / 2)
         onChunk(stream, text)
       }
 

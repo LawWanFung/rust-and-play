@@ -22,8 +22,15 @@ const codeEl = $<HTMLTextAreaElement>('#code')
 const compileBtn = $<HTMLButtonElement>('#compile')
 const terminalEl = $<HTMLDivElement>('#terminal')
 
-function setStatus(html: string) {
-  statusEl.innerHTML = html
+/** Build the status line as DOM (textContent, never innerHTML —
+ *  SECURITY.md finding 3). `tail` is unstyled trailing text. */
+function setStatus(text: string, opts: { cls?: 'ok' | 'err' | 'warn'; tail?: string } = {}) {
+  statusEl.textContent = ''
+  const span = document.createElement('span')
+  if (opts.cls) span.className = opts.cls
+  span.textContent = text
+  statusEl.appendChild(span)
+  if (opts.tail) statusEl.appendChild(document.createTextNode(opts.tail))
 }
 function termWrite(text: string, cls = 'out') {
   const span = document.createElement('span')
@@ -37,7 +44,10 @@ function termLine(text = '', cls = 'out') {
 }
 function addMetric(name: string, ms: number) {
   const el = document.createElement('span')
-  el.innerHTML = `${name}: <b>${(ms / 1000).toFixed(1)}s</b>`
+  el.textContent = name + ': '
+  const b = document.createElement('b')
+  b.textContent = (ms / 1000).toFixed(1) + 's'
+  el.appendChild(b)
   metricsEl.appendChild(el)
 }
 
@@ -106,7 +116,7 @@ function runRustc(args: string[], source: string): Promise<{ code: number; out: 
       new DataView(heartbeat).setBigInt64(0, BigInt(Date.now()), true)
       worker.onmessage = (ev) => {
         const m = ev.data as { kind: string; code?: number; out?: string; err?: string; label?: string; stream?: string; text?: string }
-        if (m.kind === 'progress') setStatus(`⚙ ${m.label ?? ''}`)
+        if (m.kind === 'progress') setStatus('⚙ ' + (m.label ?? ''))
         if (m.kind === 'chunk' && m.text) {
           streamed += m.text
           termWrite(m.text, m.stream === 'err' ? 'err' : 'out')
@@ -164,7 +174,7 @@ async function loadRustc() {
   terminalEl.innerHTML = ''
   termWrite((v.out || v.err || 'rustc --version failed').trim() + String.fromCharCode(10), 'ok')
 
-  setStatus('<span class="ok">✓ rustc ready</span> — pick a case, hit ⚡ Compile')
+  setStatus('✓ rustc ready', { cls: 'ok', tail: ' — pick a case, hit ⚡ Compile' })
   compileBtn.disabled = false
 }
 
@@ -208,17 +218,18 @@ compileBtn.addEventListener('click', async () => {
 
 async function boot() {
   if (!crossOriginIsolated) {
-    setStatus(
-      '<span class="err">✗ not cross-origin-isolated</span> — SharedArrayBuffer unavailable. ' +
-      'Reload via the dev server (http://localhost:5173/spike/), which sends COOP/COEP headers.',
-    )
+    setStatus('✗ not cross-origin-isolated', {
+      cls: 'err',
+      tail:
+        ' — SharedArrayBuffer unavailable. Reload via the dev server (http://localhost:5173/spike/), which sends COOP/COEP headers.',
+    })
     return
   }
   setStatus('page is cross-origin-isolated ✓ — booting…')
   try {
     await loadRustc()
   } catch (e) {
-    setStatus(`<span class="err">✗ failed: ${e}</span>`)
+    setStatus(`✗ failed: ${e}`, { cls: 'err' })
     console.error(e)
   }
 }

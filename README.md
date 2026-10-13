@@ -74,3 +74,8 @@ See [PLAN.md](./PLAN.md).
 ## Stack
 
 Vite + React + TypeScript. Pure static SPA — deploy anywhere.
+
+## Security
+
+See [SECURITY.md](./SECURITY.md) — the full review (2026-10-13) of the in-browser rustc sandbox:
+pinned + hash-verified compiler assets, output caps, CSP, and the deploy header requirements.

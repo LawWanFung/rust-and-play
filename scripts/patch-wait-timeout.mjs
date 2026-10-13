@@ -60,12 +60,23 @@ while (i < b.length) {
 writeFileSync(outPath, Buffer.from(b))
 console.log(`patched ${patched} indefinite wait32 -> 200ms; wrote ${outPath}`)
 
-// validate
-const module = await WebAssembly.compile(Buffer.from(b))
-const memory = new WebAssembly.Memory({ initial: 256, maximum: 16384, shared: true })
-const imports = { env: { memory }, wasi: { 'thread-spawn': () => 0 }, wasi_snapshot_preview1: {} }
-for (const imp of WebAssembly.Module.imports(module)) {
-  if (imp.module === 'wasi_snapshot_preview1') imports.wasi_snapshot_preview1[imp.name] = () => 0
+// validate (Node's V8 gates shared memory behind --experimental-wasm-shared
+// and some builds reject it — browsers are the real target, see SECURITY.md)
+try {
+  const module = await WebAssembly.compile(Buffer.from(b))
+  const memory = new WebAssembly.Memory({ initial: 256, maximum: 16384, shared: true })
+  const imports = { env: { memory }, wasi: { 'thread-spawn': () => 0 }, wasi_snapshot_preview1: {} }
+  for (const imp of WebAssembly.Module.imports(module)) {
+    if (imp.module === 'wasi_snapshot_preview1') imports.wasi_snapshot_preview1[imp.name] = () => 0
+  }
+  await WebAssembly.instantiate(module, imports)
+  console.log('patched module instantiates OK')
+} catch (e) {
+  if (/shared/i.test(e.message)) {
+    console.log(`NOTE: this Node cannot instantiate shared-memory modules (${e.message})`)
+    console.log('      structural patch written; validate in a browser (npm run dev → /spike/)')
+  } else {
+    console.error('patched module validate failed:', e.message)
+    process.exit(1)
+  }
 }
-await WebAssembly.instantiate(module, imports)
-console.log('patched module instantiates OK')

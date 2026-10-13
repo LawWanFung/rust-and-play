@@ -27,18 +27,35 @@ import {
 const NL = String.fromCharCode(10)
 
 /** WASI fd that records everything written to it AND streams it to the
- *  page on line boundaries. */
+ *  page on line boundaries. Retention is capped (a hostile/buggy compiler
+ *  must not be able to grow the worker without limit — SECURITY.md #2). */
 class Cap extends Fd {
   private data = new Uint8Array(0)
   private flushed = 0
+  private truncated = false
   constructor(private stream: 'out' | 'err' | 'sys') {
     super()
+  }
+  private enforceCap() {
+    const CAP_MAX = 1 << 20 // 1 MiB
+    if (this.data.length <= CAP_MAX) return
+    const drop = this.data.length - CAP_MAX
+    if (this.flushed < drop) {
+      const fresh = new TextDecoder().decode(this.data.subarray(this.flushed, drop))
+      if (fresh) post({ kind: 'chunk', stream: this.stream, text: fresh })
+      this.flushed = 0
+    } else {
+      this.flushed -= drop
+    }
+    this.data = new Uint8Array(this.data.subarray(drop))
+    this.truncated = true
   }
   fd_write(d: Uint8Array): { ret: number; nwritten: number } {
     const next = new Uint8Array(this.data.length + d.length)
     next.set(this.data)
     next.set(d, this.data.length)
     this.data = next
+    this.enforceCap()
     const fresh = new TextDecoder().decode(this.data.subarray(this.flushed))
     if (fresh.includes(NL) || this.data.length - this.flushed > 4096) {
       this.flushed = this.data.length
@@ -46,14 +63,16 @@ class Cap extends Fd {
     }
     return { ret: 0, nwritten: d.length }
   }
-  /** Flush any remainder to the page; return the full captured output. */
+  /** Flush any remainder to the page; return the captured (possibly
+   *  tail-truncated) output. */
   text(): string {
     const fresh = new TextDecoder().decode(this.data.subarray(this.flushed))
     if (fresh) {
       this.flushed = this.data.length
       post({ kind: 'chunk', stream: this.stream, text: fresh })
     }
-    return new TextDecoder().decode(this.data)
+    const t = new TextDecoder().decode(this.data)
+    return this.truncated ? '…(output truncated at 1 MiB)…' + NL + t : t
   }
 }
 

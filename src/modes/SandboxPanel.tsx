@@ -44,7 +44,9 @@ export function SandboxPanel({ initialCode, onDone }: Props) {
       setLines((ls) => {
         const next = [...ls]
         for (const piece of text.split('\n')) {
-          next.push({ text: piece, cls: stream === 'err' ? 'err' : 'out' })
+          // cap line size (SECURITY.md finding 2): a hostile stream must not
+          // be able to push multi-megabyte "lines" into the DOM
+          next.push({ text: piece.length > 4096 ? piece.slice(0, 4096) + ' …' : piece, cls: stream === 'err' ? 'err' : 'out' })
         }
         return next.slice(-300) // cap the terminal
       })

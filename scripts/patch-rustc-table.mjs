@@ -5,7 +5,7 @@
 //
 // Usage: node scripts/patch-rustc-table.mjs
 // Output: public/spike/rustc-patched.wasm
-import { readFileSync, writeFileSync, existsSync } from 'node:fs'
+import { readFileSync, writeFileSync } from 'node:fs'
 import path from 'node:path'
 import { fileURLToPath } from 'node:url'
 
@@ -71,13 +71,15 @@ let k = importSec.headerEnd
 const [importCount, kAfterCount] = readLeb(b, k)
 console.log('imports:', importCount)
 
-// Build the new import entry: env.table, kind=0x04 (table), flags, min, max
+// Build the new import entry: env.table, kind=0x01 (table), flags, min, max
 // import declares the table SHARED (bit1) so the host can provide a shared Table
 const importFlags = flags | 0x02
 const newEntry = [
   3, 0x65, 0x6e, 0x76, // "env"
   5, 0x74, 0x61, 0x62, 0x6c, 0x65, // "table"
-  0x01, 0x70, importFlags, // import kind 1 = table, elemtype = funcref ...encLeb(tmin), ...(importFlags & 1 ? encLeb(tmax) : []), // kind=table, elemtype=funcref
+  0x01, 0x70, importFlags, // kind=1 (table), elemtype=funcref (0x70), flags
+  ...encLeb(tmin),
+  ...(importFlags & 1 ? encLeb(tmax) : []),
 ]
 
 // ---------- rewrite ----------
@@ -107,25 +109,30 @@ writeFileSync(outPath, Buffer.from(out))
 console.log(`wrote ${outPath} (${out.length} bytes, was ${b.length})`)
 
 // ---------- validate ----------
-const { WASI } = await import('@bjorn3/browser_wasi_shim')
-const module = await WebAssembly.compile(Buffer.from(out))
-const table = new WebAssembly.Table({ initial: tmin, maximum: tmax, shared: true })
-const memory = new WebAssembly.Memory({ initial: 16, maximum: 16384, shared: true })
-const preview1 = {}
-for (const [ns, obj] of Object.entries(WASI.prototype ? {} : {})) {} // noop
-// Provide stubs for all preview1 imports
-const instImports = {
-  env: { memory, table },
-  wasi: { 'thread-spawn': (a) => 0 },
-  wasi_snapshot_preview1: {},
-}
-const moduleImports = WebAssembly.Module.imports(module)
-for (const imp of moduleImports) {
-  if (imp.module === 'wasi_snapshot_preview1') instImports.wasi_snapshot_preview1[imp.name] = () => 0
-}
+// Browsers support shared memory/table natively (COOP/COEP). Node's V8 gates
+// it behind --experimental-wasm-shared, and some Node builds reject the
+// combination outright — so a "shared" CompileError means "structure OK,
+// validate in a browser", not a patch failure.
 try {
+  const module = await WebAssembly.compile(Buffer.from(out))
+  const table = new WebAssembly.Table({ initial: tmin, maximum: tmax, shared: true })
+  const memory = new WebAssembly.Memory({ initial: 16, maximum: 16384, shared: true })
+  const instImports = {
+    env: { memory, table },
+    wasi: { 'thread-spawn': (a) => 0 },
+    wasi_snapshot_preview1: {},
+  }
+  for (const imp of WebAssembly.Module.imports(module)) {
+    if (imp.module === 'wasi_snapshot_preview1') instImports.wasi_snapshot_preview1[imp.name] = () => 0
+  }
   await WebAssembly.instantiate(module, instImports)
   console.log('PATCHED MODULE: instantiates OK with shared table')
 } catch (e) {
-  console.log('PATCHED MODULE instantiate failed:', e.message)
+  if (/shared/i.test(e.message)) {
+    console.log(`NOTE: this Node cannot instantiate shared-memory modules (${e.message})`)
+    console.log('      structural patch written; validate in a browser (npm run dev → /spike/)')
+  } else {
+    console.error('PATCHED MODULE validate failed:', e.message)
+    process.exit(1)
+  }
 }
