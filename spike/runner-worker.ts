@@ -192,15 +192,15 @@ self.onmessage = async (ev: MessageEvent) => {
     tick()
 
     let err = (crash ? crash + '\n' : '') + stderr.text()
-    // No `cc` in the sandbox: the final link step always "fails" after all
-    // real diagnostics. If that is the only error, treat it as success.
+    // No `cc` in the sandbox: the final link always fails after all real
+    // diagnostics, then the process aborts (wasm `unreachable`). Expected.
     if (
       code === -999 &&
       err.includes('could not exec the linker') &&
       !/error\[E\d+\]/.test(err.split('error: could not exec the linker')[0])
     ) {
       code = 0
-      err = err.split('error: could not exec the linker')[0].trimEnd() + '\n'
+      err = 'note: no linker in sandbox (cc not available) — compilation itself succeeded' + String.fromCharCode(10)
     }
     post({ kind: 'result', code, out: stdout.text(), err })
   } catch (e) {
