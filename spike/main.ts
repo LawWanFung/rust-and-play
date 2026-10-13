@@ -62,58 +62,17 @@ document.querySelector<HTMLButtonElement>('button.case[data-case="hello"]')!.cla
 
 // ---------------------------------------------------------------- std rlibs
 
-// The exact 27 files rustc needs under /sysroot/lib/rustlib/x86_64-unknown-linux-gnu/lib
-// (same set as the browser_wasi_shim demo).
-const RLIBS = [
-  'libaddr2line-b8754aeb03c02354.rlib',
-  'libadler-05c3545f6cd12159.rlib',
-  'liballoc-0dab879bc41cd6bd.rlib',
-  'libcfg_if-c7fd2cef50341546.rlib',
-  'libcompiler_builtins-a99947d020d809d6.rlib',
-  'libcore-4b8e8a815d049db3.rlib',
-  'libgetopts-bbb75529e85d129d.rlib',
-  'libgimli-598847d27d7a3cbf.rlib',
-  'libhashbrown-d2ff91fdf93cacb2.rlib',
-  'liblibc-dc63949c664c3fce.rlib',
-  'libmemchr-2d3a423be1a6cb96.rlib',
-  'libminiz_oxide-b109506a0ccc4c6a.rlib',
-  'libobject-7b48def7544c748b.rlib',
-  'libpanic_abort-c93441899b93b849.rlib',
-  'libpanic_unwind-11d9ba05b60bf694.rlib',
-  'libproc_macro-1a7f7840bb9983dc.rlib',
-  'librustc_demangle-59342a335246393d.rlib',
-  'librustc_std_workspace_alloc-552b185085090ff6.rlib',
-  'librustc_std_workspace_core-5d8a121daa7eeaa9.rlib',
-  'librustc_std_workspace_std-97f43841ce452f7d.rlib',
-  'libstd-bdedb7706a556da2.rlib',
-  'libstd-bdedb7706a556da2.so',
-  'libstd_detect-cca21eebc4281add.rlib',
-  'libsysroot-f654e185be3ffebd.rlib',
-  'libtest-f06fa3fbc201c558.rlib',
-  'libunicode_width-19a0dcd589fa0877.rlib',
-  'libunwind-747b693f90af9445.rlib',
-]
 
 // ---------------------------------------------------------------- output fd
 
 // ---------------------------------------------------------------- rustc (runner worker)
 
-interface LibAsset {
-  name: string
-  data: ArrayBuffer
-}
-interface RustcAssets {
-  wasmBytes: ArrayBuffer
-  libs: LibAsset[]
-}
-
-let rustc: RustcAssets | null = null
 let running = false
 const STALE_MS = 15000
 const MAX_ATTEMPTS = 3
 
 /** One rustc run on a dedicated worker; heartbeat + terminate + retry. */
-function runRustc(r: RustcAssets, args: string[], source: string): Promise<{ code: number; out: string; err: string }> {
+function runRustc(args: string[], source: string): Promise<{ code: number; out: string; err: string }> {
   return new Promise((resolve, reject) => {
     let worker: Worker | null = null
     let poll: number | undefined
@@ -170,80 +129,25 @@ function runRustc(r: RustcAssets, args: string[], source: string): Promise<{ cod
           }
         }
       }, 500)
-      worker.postMessage(
-        { kind: 'run', source, wasmBytes: r.wasmBytes, libs: r.libs, heartbeat, args },
-        [r.wasmBytes, ...r.libs.map((l) => l.data), heartbeat],
-      )
+      // NO transfer list: a SharedArrayBuffer cannot be transferred (it is
+      // shared by reference by design); the worker fetches its own assets
+      worker.postMessage({ kind: 'run', source, heartbeat, args })
     }
     startAttempt()
   })
 }
 
-async function fetchWithProgress(url: string, onPct: (pct: number) => void): Promise<ArrayBuffer> {
-  const res = await fetch(url)
-  if (!res.ok) throw new Error(`${url} → HTTP ${res.status}`)
-  const total = Number(res.headers.get('content-length') ?? 0)
-  if (!res.body) return res.arrayBuffer()
-  const reader = res.body.getReader()
-  const chunks: Uint8Array[] = []
-  let got = 0
-  for (;;) {
-    const { done, value } = await reader.read()
-    if (done) break
-    if (!value) continue
-    chunks.push(value)
-    got += value.length
-    if (total) onPct((got / total) * 100)
-  }
-  const out = new Uint8Array(got)
-  let off = 0
-  for (const c of chunks) {
-    out.set(c, off)
-    off += c.length
-  }
-  return out.buffer
-}
-
 async function loadRustc() {
-  const t0 = performance.now()
+  setStatus('⚙ booting runner worker (it fetches rustc.wasm + std, ~180MB)…')
+  barWasm.style.width = '100%'
+  pctWasm.textContent = 'worker'
+  barLibs.style.width = '100%'
+  pctLibs.textContent = 'worker'
 
-  setStatus('⬇ downloading <span class="ok">rustc.wasm</span> (81MB)…')
-  const wasmBytes = await fetchWithProgress('/spike/rustc.wasm', (pct) => {
-    barWasm.style.width = pct.toFixed(1) + '%'
-    pctWasm.textContent = pct.toFixed(0) + '%'
-  })
-  addMetric('wasm download', performance.now() - t0)
-
-  setStatus('⬇ downloading <span class="ok">std rlibs</span> (27 files, 98MB)…')
-  const t1 = performance.now()
-  const libs: LibAsset[] = []
-  let doneCount = 0
-  const queue = [...RLIBS]
-  async function dlWorker() {
-    for (;;) {
-      const name = queue.shift()
-      if (!name) return
-      const res = await fetch('/spike/sysroot/lib/rustlib/x86_64-unknown-linux-gnu/lib/' + name)
-      if (!res.ok) {
-        throw new Error(
-          `missing /spike/sysroot/lib/.../${name} (HTTP ${res.status}) — run: node scripts/fetch-spike-assets.mjs`,
-        )
-      }
-      libs.push({ name, data: await res.arrayBuffer() })
-      doneCount++
-      barLibs.style.width = ((doneCount / RLIBS.length) * 100).toFixed(1) + '%'
-      pctLibs.textContent = `${doneCount}/${RLIBS.length}`
-    }
-  }
-  await Promise.all(Array.from({ length: 6 }, dlWorker))
-  addMetric('rlibs download', performance.now() - t1)
-
-  rustc = { wasmBytes, libs }
-
-  // identity check: rustc --version through the runner worker
+// identity check: rustc --version through the runner worker
   const t2 = performance.now()
   terminalEl.innerHTML = ''
-  const v = await runRustc(rustc, ['rustc', '--version'], '')
+  const v = await runRustc(['rustc', '--version'], '')
   addMetric('first run (--version)', performance.now() - t2)
   termWrite((v.out || v.err || 'rustc --version failed').trim() + String.fromCharCode(10), 'ok')
 
@@ -254,7 +158,7 @@ async function loadRustc() {
 // ---------------------------------------------------------------- compile
 
 compileBtn.addEventListener('click', async () => {
-  if (!rustc || running) return
+  if (running) return
   running = true
   compileBtn.disabled = true
   terminalEl.innerHTML = ''
@@ -271,7 +175,7 @@ compileBtn.addEventListener('click', async () => {
   termLine(`$ ${args.join(' ')}`, 'sys')
   const t0 = performance.now()
   try {
-    const r = await runRustc(rustc, args, codeEl.value)
+    const r = await runRustc(args, codeEl.value)
     const dt = (performance.now() - t0) / 1000
     if (r.out) termWrite(r.out, 'out')
     if (r.err) termWrite(r.err, r.code === 0 ? 'out' : 'err')

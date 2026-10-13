@@ -38,17 +38,57 @@ class Cap extends Fd {
   }
 }
 
-interface LibRef {
-  name: string
-  data: ArrayBuffer
-}
+// The worker fetches its own assets (rustc.wasm + std rlibs). The page
+// only sends the run request + a SharedArrayBuffer heartbeat reference —
+// a SAB can NOT be transferred (it is shared by reference by design), and
+// not transferring the 180 MB of assets keeps the page's copies intact for
+// retries (a transferred ArrayBuffer is detached on the sender side).
 interface RunMsg {
   kind: 'run'
   source: string
-  wasmBytes: ArrayBuffer
-  libs: LibRef[]
   heartbeat: ArrayBuffer
   args: string[]
+}
+
+const RLIBS = [
+  'libaddr2line-b8754aeb03c02354.rlib',
+  'libadler-05c3545f6cd12159.rlib',
+  'liballoc-0dab879bc41cd6bd.rlib',
+  'libcfg_if-c7fd2cef50341546.rlib',
+  'libcompiler_builtins-a99947d020d809d6.rlib',
+  'libcore-4b8e8a815d049db3.rlib',
+  'libgetopts-bbb75529e85d129d.rlib',
+  'libgimli-598847d27d7a3cbf.rlib',
+  'libhashbrown-d2ff91fdf93cacb2.rlib',
+  'liblibc-dc63949c664c3fce.rlib',
+  'libmemchr-2d3a423be1a6cb96.rlib',
+  'libminiz_oxide-b109506a0ccc4c6a.rlib',
+  'libobject-7b48def7544c748b.rlib',
+  'libpanic_abort-c93441899b93b849.rlib',
+  'libpanic_unwind-11d9ba05b60bf694.rlib',
+  'libproc_macro-1a7f7840bb9983dc.rlib',
+  'librustc_demangle-59342a335246393d.rlib',
+  'librustc_std_workspace_alloc-552b185085090ff6.rlib',
+  'librustc_std_workspace_core-5d8a121daa7eeaa9.rlib',
+  'librustc_std_workspace_std-97f43841ce452f7d.rlib',
+  'libstd-bdedb7706a556da2.rlib',
+  'libstd-bdedb7706a556da2.so',
+  'libstd_detect-cca21eebc4281add.rlib',
+  'libsysroot-f654e185be3ffebd.rlib',
+  'libtest-f06fa3fbc201c558.rlib',
+  'libunicode_width-19a0dcd589fa0877.rlib',
+  'libunwind-747b693f90af9445.rlib',
+]
+const LIB_DIR = '/spike/sysroot/lib/rustlib/x86_64-unknown-linux-gnu/lib/'
+
+async function fetchLibs(): Promise<[string, Inode][]> {
+  const out: [string, Inode][] = []
+  for (const name of RLIBS) {
+    const res = await fetch(LIB_DIR + name)
+    if (!res.ok) throw new Error(`missing ${LIB_DIR}${name} (HTTP ${res.status})`)
+    out.push([name, new File(new Uint8Array(await res.arrayBuffer()))])
+  }
+  return out
 }
 
 self.onmessage = async (ev: MessageEvent) => {
@@ -65,11 +105,12 @@ self.onmessage = async (ev: MessageEvent) => {
   }
 
   try {
-    post({ kind: 'progress', pct: 10, label: 'building sysroot' })
-    const libContents: [string, Inode][] = msg.libs.map((l) => [
-      l.name,
-      new File(new Uint8Array(l.data)),
-    ])
+    post({ kind: 'progress', pct: 5, label: 'fetching std rlibs (27 files)' })
+    const libContents = await fetchLibs()
+    post({ kind: 'progress', pct: 40, label: 'fetching rustc.wasm (81MB)' })
+    const wasmRes = await fetch('/spike/rustc.wasm')
+    if (!wasmRes.ok) throw new Error(`rustc.wasm HTTP ${wasmRes.status}`)
+    const wasmBytes = await wasmRes.arrayBuffer()
     const sysroot = new Directory([
       [
         'lib',
@@ -85,8 +126,8 @@ self.onmessage = async (ev: MessageEvent) => {
     ])
     const workDir = new Directory([['main.rs', new File(new TextEncoder().encode(msg.source))]])
 
-    post({ kind: 'progress', pct: 40, label: 'compiling rustc module' })
-    const module = await WebAssembly.compile(msg.wasmBytes)
+    post({ kind: 'progress', pct: 70, label: 'compiling rustc module' })
+    const module = await WebAssembly.compile(wasmBytes)
     const memory = new WebAssembly.Memory({ initial: 256, maximum: 16384, shared: true })
 
     const stdout = new Cap()
