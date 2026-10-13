@@ -1,5 +1,7 @@
+import { useState } from 'react'
 import type { MatchPair, Question } from '../game/types'
 import { CodeBlock } from '../ui/CodeBlock'
+import { SandboxPanel } from './SandboxPanel'
 
 /** the three option-answering modes (match rounds use MatchGame) */
 export type OptionQuestion = Extract<Question, { mode: 'quiz' | 'predict' | 'fix' }>
@@ -26,6 +28,7 @@ const CHIP: Record<Question['mode'], { label: string; cls: string }> = {
 export function QuestionView({ q, phase, selected, gainedXp, onAnswer, onContinue }: Props) {
   // match rounds are rendered by MatchGame in Run; this view handles the
   // three option-based modes (quiz / predict / fix)
+  const [inSandbox, setInSandbox] = useState(false)
   const isCorrect = selected !== null && selected === q.answer
   const timedOut = selected === -1
   const chip = CHIP[q.mode]
@@ -45,6 +48,14 @@ export function QuestionView({ q, phase, selected, gainedXp, onAnswer, onContinu
         </div>
       )}
       {q.code && <CodeBlock code={q.code} />}
+      {q.mode === 'fix' && q.code && phase === 'question' && !inSandbox && (
+        <button className="btn sb-open" onClick={() => setInSandbox(true)}>
+          🛠 Try it in the sandbox
+        </button>
+      )}
+      {q.mode === 'fix' && q.code && phase === 'question' && inSandbox && (
+        <SandboxPanel initialCode={q.code} onDone={() => setInSandbox(false)} />
+      )}
       <div className="options">
         {q.options.map((opt, i) => {
           let cls = 'option'

@@ -883,3 +883,85 @@ body {
     font-size: 30px;
   }
 }
+
+/* ── v0.3 sandbox (real rustc in the browser) ──────────────── */
+
+.sb-open {
+  margin: 12px auto 0;
+  display: block;
+}
+
+.sandbox {
+  margin-top: 12px;
+  border-color: rgba(255, 209, 102, 0.35);
+}
+
+.sb-head {
+  font-family: var(--mono);
+  font-size: 13px;
+  letter-spacing: 2px;
+  color: var(--yellow);
+  margin-bottom: 8px;
+}
+.sb-sub {
+  color: var(--dim);
+  letter-spacing: 0;
+  font-size: 11px;
+}
+
+.code-editor {
+  width: 100%;
+  min-height: 120px;
+  resize: vertical;
+  background: rgba(0, 0, 0, 0.45);
+  color: var(--text);
+  border: 1px solid var(--panel-border);
+  border-radius: 6px;
+  font-family: var(--mono);
+  font-size: 13px;
+  line-height: 1.5;
+  padding: 10px 12px;
+  tab-size: 2;
+}
+.code-editor:focus {
+  outline: none;
+  border-color: var(--cyan);
+}
+
+.sb-actions {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  flex-wrap: wrap;
+  margin: 10px 0;
+}
+.sb-warm,
+.sb-warn {
+  font-size: 12px;
+  color: var(--dim);
+}
+.sb-warn {
+  color: var(--yellow);
+}
+.sb-unavailable {
+  color: var(--dim);
+  font-size: 13px;
+}
+
+.sb-term {
+  background: #04070f;
+  border: 1px solid var(--panel-border);
+  border-radius: 6px;
+  font-family: var(--mono);
+  font-size: 12.5px;
+  line-height: 1.45;
+  padding: 10px 12px;
+  max-height: 220px;
+  overflow-y: auto;
+  white-space: pre-wrap;
+  word-break: break-word;
+}
+.sb-term .out { color: var(--text); }
+.sb-term .err { color: var(--red); }
+.sb-term .sys { color: var(--dim); }
+.sb-term .ok  { color: var(--green); }
