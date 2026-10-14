@@ -578,6 +578,35 @@ body {
   margin: 0 0 24px;
 }
 
+/* ── crash screen (ErrorBoundary) ─────────────────────── */
+.crash {
+  padding: 48px 32px;
+  text-align: center;
+  animation: fadein 0.3s ease;
+  max-width: 560px;
+  margin: 8vh auto;
+}
+.crash-icon {
+  font-size: 56px;
+}
+.crash h1 {
+  font-size: 32px;
+  letter-spacing: 4px;
+  color: var(--red);
+  text-shadow: 0 0 24px rgba(239, 71, 111, 0.5);
+  margin: 14px 0 8px;
+}
+.crash p {
+  color: var(--dim);
+  margin: 0 0 24px;
+}
+.crash-actions {
+  display: flex;
+  gap: 12px;
+  justify-content: center;
+  flex-wrap: wrap;
+}
+
 /* ── results ───────────────────────────────────────────── */
 .results {
   padding: 40px 32px;

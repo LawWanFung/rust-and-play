@@ -15,15 +15,18 @@ interface Props {
 }
 
 export function MatchGame({ pairs, onResult }: Props) {
+  // a malformed/empty pair list must lose the round, never auto-win
+  // (QUALITY.md #6): `matched.size (0) === pairs.length (0)` would fire on mount
+  const safePairs = pairs ?? []
   const cards = useMemo<Card[]>(
     () =>
       shuffle(
-        pairs.flatMap((p, i) => [
+        safePairs.flatMap((p, i) => [
           { key: i * 2, pairId: i, text: p.a },
           { key: i * 2 + 1, pairId: i, text: p.b },
         ]),
       ),
-    [pairs],
+    [safePairs],
   )
 
   const [faceUp, setFaceUp] = useState<number[]>([])
@@ -31,6 +34,23 @@ export function MatchGame({ pairs, onResult }: Props) {
   const [flips, setFlips] = useState(0)
   const [timeLeft, setTimeLeft] = useState(MATCH_TIME)
   const done = useRef(false)
+  const timers = useRef<number[]>([])
+
+  // clear pending flip timers on unmount (QUALITY.md #10)
+  useEffect(() => () => timers.current.forEach((t) => window.clearTimeout(t)), [])
+
+  const later = (fn: () => void, ms: number) => {
+    timers.current.push(window.setTimeout(fn, ms))
+  }
+
+  // degenerate content (zero pairs) → immediate loss, once
+  useEffect(() => {
+    if (safePairs.length === 0 && !done.current) {
+      done.current = true
+      onResult(false, 0, MATCH_TIME)
+    }
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [])
 
   // countdown
   useEffect(() => {
@@ -41,7 +61,7 @@ export function MatchGame({ pairs, onResult }: Props) {
 
   // timeout
   useEffect(() => {
-    if (!done.current && timeLeft <= 0) {
+    if (!done.current && safePairs.length > 0 && timeLeft <= 0) {
       done.current = true
       onResult(false, flips, MATCH_TIME)
     }
@@ -50,7 +70,7 @@ export function MatchGame({ pairs, onResult }: Props) {
 
   // win
   useEffect(() => {
-    if (!done.current && matched.size === pairs.length) {
+    if (!done.current && safePairs.length > 0 && matched.size === safePairs.length) {
       done.current = true
       onResult(true, flips, MATCH_TIME - timeLeft)
     }
@@ -60,31 +80,32 @@ export function MatchGame({ pairs, onResult }: Props) {
   function flip(key: number) {
     if (done.current || faceUp.length === 2) return
     const card = cards[key]
+    if (!card) return
     if (matched.has(card.pairId) || faceUp.includes(key)) return
     const next = [...faceUp, key]
     setFaceUp(next)
     if (next.length === 2) {
       setFlips((f) => f + 1)
       const [a, b] = next.map((k) => cards[k])
-      if (a.pairId === b.pairId) {
-        setTimeout(() => {
+      if (a && b && a.pairId === b.pairId) {
+        later(() => {
           setMatched((m) => new Set(m).add(a.pairId))
           setFaceUp([])
         }, 450)
       } else {
-        setTimeout(() => setFaceUp([]), 900)
+        later(() => setFaceUp([]), 900)
       }
     }
   }
 
   const matchedCount = matched.size
-  const allMatched = matchedCount === pairs.length
+  const allMatched = safePairs.length > 0 && matchedCount === safePairs.length
 
   return (
     <div className="match">
       <div className="match-top">
         <span className="match-pairs">
-          {matchedCount}/{pairs.length} pairs
+          {matchedCount}/{safePairs.length} pairs
         </span>
         <span className="match-flips">{flips} flips</span>
       </div>

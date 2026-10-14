@@ -40,27 +40,35 @@ export function SandboxPanel({ initialCode, onDone }: Props) {
     setLastResult(null)
     setLines([{ text: '$ rustc main.rs', cls: 'sys' }])
     const t0 = performance.now()
-    const r = await sandbox.compile(code, (stream, text) => {
-      setLines((ls) => {
-        const next = [...ls]
-        for (const piece of text.split('\n')) {
-          // cap line size (SECURITY.md finding 2): a hostile stream must not
-          // be able to push multi-megabyte "lines" into the DOM
-          next.push({ text: piece.length > 4096 ? piece.slice(0, 4096) + ' …' : piece, cls: stream === 'err' ? 'err' : 'out' })
-        }
-        return next.slice(-300) // cap the terminal
+    try {
+      const r = await sandbox.compile(code, (stream, text) => {
+        setLines((ls) => {
+          const next = [...ls]
+          for (const piece of text.split('\n')) {
+            // cap line size (SECURITY.md finding 2): a hostile stream must not
+            // be able to push multi-megabyte "lines" into the DOM
+            next.push({ text: piece.length > 4096 ? piece.slice(0, 4096) + ' …' : piece, cls: stream === 'err' ? 'err' : 'out' })
+          }
+          return next.slice(-300) // cap the terminal
+        })
       })
-    })
-    const dt = (performance.now() - t0) / 1000
-    setLastResult(r)
-    if (r.code === 0) {
-      setLines((ls) => [...ls, { text: `✓ compiled clean in ${dt.toFixed(1)}s`, cls: 'ok' }])
-    } else if (r.code === 1) {
-      setLines((ls) => [...ls, { text: `✗ ${dt.toFixed(1)}s — fix the errors above and compile again`, cls: 'err' }])
-    } else {
-      setLines((ls) => [...ls, { text: `✗ sandbox gave up after ${dt.toFixed(1)}s`, cls: 'err' }])
+      const dt = (performance.now() - t0) / 1000
+      setLastResult(r)
+      if (r.code === 0) {
+        setLines((ls) => [...ls, { text: `✓ compiled clean in ${dt.toFixed(1)}s`, cls: 'ok' }])
+      } else if (r.code === 1) {
+        setLines((ls) => [...ls, { text: `✗ ${dt.toFixed(1)}s — fix the errors above and compile again`, cls: 'err' }])
+      } else {
+        setLines((ls) => [...ls, { text: `✗ sandbox gave up after ${dt.toFixed(1)}s`, cls: 'err' }])
+      }
+    } catch (e) {
+      // the client contract says compile() never rejects — but a future
+      // refactor must not take the panel down with it (QUALITY.md #7)
+      const dt = (performance.now() - t0) / 1000
+      setLines((ls) => [...ls, { text: `✗ sandbox error after ${dt.toFixed(1)}s: ${String(e)}`, cls: 'err' }])
+    } finally {
+      setBusy(false)
     }
-    setBusy(false)
   }
 
   if (state === 'failed') {
@@ -83,7 +91,15 @@ export function SandboxPanel({ initialCode, onDone }: Props) {
       <div className="sb-head">
         🛠 SANDBOX <span className="sb-sub">real rustc, in your browser</span>
       </div>
-      <CodeEditor value={code} onChange={setCode} lines={Math.min(14, Math.max(6, code.split('\n').length + 1))} />
+      <CodeEditor
+        value={code}
+        // cap editor size (QUALITY.md #12): a pasted 50 MB file must not
+        // wedge the textarea or the worker's in-memory FS
+        onChange={(v) => {
+          if (v.length <= 100_000) setCode(v)
+        }}
+        lines={Math.min(14, Math.max(6, code.split('\n').length + 1))}
+      />
       <div className="sb-actions">
         <button className="btn primary" disabled={busy || state === 'loading'} onClick={compile}>
           {busy ? '⚡ compiling…' : state === 'loading' ? '⏳ warming up rustc…' : '⚡ Compile'}

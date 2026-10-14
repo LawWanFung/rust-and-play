@@ -33,7 +33,6 @@ class SandboxClient {
   private worker: Worker | null = null
   private hb: SharedArrayBuffer | null = null
   private hbView: DataView | null = null
-  private poll: number | undefined
   private runSlot: { chunk: (s: StreamKind, t: string) => void; result: (c: number, o: string, e: string) => void } | null = null
   private runSeq = 0
   private listeners = new Set<(s: SandboxState) => void>()
@@ -85,14 +84,23 @@ class SandboxClient {
     return run
   }
 
-  /** Abort the in-flight run (user navigated away). */
+  /** Abort the in-flight run (page unload / navigation). The worker is
+   *  killed; the pending run promise resolves as "abandoned" so the queue
+   *  unblocks (QUALITY.md #9). */
   cancel() {
-    if (this.poll) window.clearInterval(this.poll)
-    this.poll = undefined
-    this.worker?.terminate()
+    if (this.worker) {
+      this.worker.onmessage = null
+      this.worker.onerror = null
+      this.worker.terminate()
+    }
     this.worker = null
     this.hb = null
     this.hbView = null
+    if (this.runSlot) {
+      const slot = this.runSlot
+      this.runSlot = null
+      slot.result(-998, '', 'abandoned')
+    }
   }
 
   // ------------------------------------------------------------------
@@ -111,18 +119,13 @@ class SandboxClient {
     this.hbView.setBigInt64(0, BigInt(Date.now()), true)
 
     this.worker.onmessage = (ev) => {
-      const m = ev.data as {
-        kind: string
-        id?: number
-        pct?: number
-        label?: string
-        stream?: StreamKind
-        text?: string
-        code?: number
-        out?: string
-        err?: string
-      }
-      switch (m.kind) {
+      // validate shape: a non-object message (or a future protocol drift)
+      // must be ignored, never throw (QUALITY.md #9)
+      const m = ev.data as Record<string, unknown> | null | undefined
+      if (typeof m !== 'object' || m === null || typeof m.kind !== 'string') return
+      const kind = m.kind
+      const text = typeof m.text === 'string' ? m.text : ''
+      switch (kind) {
         case 'ready':
           if (this.state !== 'failed') this.setState('ready')
           break
@@ -130,13 +133,17 @@ class SandboxClient {
           this.setState('failed')
           break
         case 'progress':
-          if (this.state === 'loading' && (m.pct ?? 0) >= 100) this.setState('ready')
+          if (this.state === 'loading' && (typeof m.pct === 'number' ? m.pct : 0) >= 100) this.setState('ready')
           break
         case 'chunk':
-          this.runSlot?.chunk(m.stream ?? 'out', m.text ?? '')
+          this.runSlot?.chunk(m.stream === 'err' ? 'err' : 'out', text)
           break
         case 'result':
-          this.runSlot?.result(m.code ?? -998, m.out ?? '', m.err ?? '')
+          this.runSlot?.result(
+            typeof m.code === 'number' ? m.code : -998,
+            typeof m.out === 'string' ? m.out : '',
+            typeof m.err === 'string' ? m.err : '',
+          )
           this.runSlot = null
           break
       }
@@ -173,7 +180,6 @@ class SandboxClient {
         if (settled) return
         settled = true
         if (poll) window.clearInterval(poll)
-        this.stopPoll()
         resolve(r)
       }
 
@@ -241,11 +247,6 @@ class SandboxClient {
 
       startAttempt()
     })
-  }
-
-  private stopPoll() {
-    if (this.poll) window.clearInterval(this.poll)
-    this.poll = undefined
   }
 
 }

@@ -49,6 +49,9 @@ export function Run({ moduleId, isBoss, save, onExit }: Props) {
   const [attempt, setAttempt] = useState(0)
 
   const questions = useMemo(() => {
+    // unknown module id (stale deep-link, removed module) → empty bank;
+    // the render below shows a recoverable screen, never a throw
+    if (!module) return []
     let bank = module.questions
     if (isBoss) {
       // boss fights remix in questions from conquered modules
@@ -66,10 +69,13 @@ export function Run({ moduleId, isBoss, save, onExit }: Props) {
       : null
     if (forced && ['quiz', 'predict', 'fix', 'match'].includes(forced)) {
       const filtered = bank.filter((q) => q.mode === forced)
-      // cycle the (small) mode bank so the run still has full length
-      const need = isBoss ? BOSS_LENGTH : RUN_LENGTH
-      while (filtered.length < need) filtered.push(...filtered)
-      bank = filtered
+      // cycle the (small) mode bank so the run still has full length.
+      // Guard: an EMPTY filter must not spin the loop forever (QUALITY.md #4)
+      if (filtered.length > 0) {
+        const need = isBoss ? BOSS_LENGTH : RUN_LENGTH
+        while (filtered.length < need) filtered.push(...filtered)
+        bank = filtered
+      }
     }
     return stratifiedPick(bank, isBoss ? BOSS_LENGTH : RUN_LENGTH)
     // eslint-disable-next-line react-hooks/exhaustive-deps
@@ -96,59 +102,55 @@ export function Run({ moduleId, isBoss, save, onExit }: Props) {
 
   // ── countdown (match rounds run their own clock) ───────
   useEffect(() => {
-    if (phase !== 'question' || q.mode === 'match') return
+    if (phase !== 'question' || !q || q.mode === 'match') return
     const id = setInterval(() => setTimeLeft((t) => t - 1), 1000)
     return () => clearInterval(id)
-  }, [phase, qIndex, q.mode, attempt])
+  }, [phase, qIndex, q?.mode, attempt])
 
   useEffect(() => {
-    if (phase === 'question' && q.mode !== 'match' && timeLeft <= 0) answer(-1)
+    if (phase === 'question' && q && q.mode !== 'match' && timeLeft <= 0) answer(-1)
     // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [timeLeft, phase, q.mode])
+  }, [timeLeft, phase, q?.mode])
 
-  // ── option-based answers (quiz / predict / fix) ────────
-  function answer(i: number) {
-    if (phase !== 'question' || q.mode === 'match') return
-    const correct = i === q.answer
-    if (correct) {
+  /** Shared settle logic for option answers and match results (QUALITY.md #14):
+   *  correct → combo/XP/counters; miss → combo reset + 1 HP lost. */
+  function applyResult(ok: boolean, xp: number, fast: boolean, kind: 'option' | 'match') {
+    if (ok) {
       const newCombo = combo + 1
-      const xp = answerXp(q, newCombo, timeLeft)
       setCombo(newCombo)
       setBestCombo((b) => Math.max(b, newCombo))
       setRunXp((x) => x + xp)
       setGainedXp(xp)
       setCorrectCount((c) => c + 1)
-      if (q.mode === 'fix') setFixWins((f) => f + 1)
-      if (timeLeft >= QUESTION_TIME - SPEED_WINDOW) setSpeedHits((s) => s + 1)
+      if (kind === 'option' && q?.mode === 'fix') setFixWins((f) => f + 1)
+      if (kind === 'match') setMatchWins((m) => m + 1)
+      if (fast) setSpeedHits((s) => s + 1)
     } else {
       setCombo(0)
       setGainedXp(0)
       setHp((h) => h - 1)
     }
-    setSelected(i)
     setPhase('feedback')
+  }
+
+  // ── option-based answers (quiz / predict / fix) ────────
+  function answer(i: number) {
+    if (phase !== 'question' || !q || q.mode === 'match') return
+    const correct = i === q.answer
+    applyResult(
+      correct,
+      correct ? answerXp(q, combo + 1, timeLeft) : 0,
+      correct && timeLeft >= QUESTION_TIME - SPEED_WINDOW,
+      'option',
+    )
+    setSelected(i)
   }
 
   // ── memory match result ────────────────────────────────
   function onMatchResult(ok: boolean, _flips: number, timeUsed: number) {
     if (phase !== 'question') return
-    if (ok) {
-      const newCombo = combo + 1
-      const xp = matchXp(newCombo, timeUsed)
-      setCombo(newCombo)
-      setBestCombo((b) => Math.max(b, newCombo))
-      setRunXp((x) => x + xp)
-      setGainedXp(xp)
-      setCorrectCount((c) => c + 1)
-      setMatchWins((m) => m + 1)
-      if (timeUsed <= MATCH_TIME / 2) setSpeedHits((s) => s + 1)
-    } else {
-      setCombo(0)
-      setGainedXp(0)
-      setHp((h) => h - 1)
-    }
+    applyResult(ok, ok ? matchXp(combo + 1, timeUsed) : 0, ok && timeUsed <= MATCH_TIME / 2, 'match')
     setSelected(ok ? 0 : -1)
-    setPhase('feedback')
   }
 
   function continueNext() {
@@ -168,7 +170,7 @@ export function Run({ moduleId, isBoss, save, onExit }: Props) {
   }
 
   function finish(outcome: 'done' | 'failed') {
-    if (finalized.current) return
+    if (finalized.current || !module) return
     finalized.current = true
 
     const s: SaveData = JSON.parse(JSON.stringify(loadSave()))
@@ -186,8 +188,12 @@ export function Run({ moduleId, isBoss, save, onExit }: Props) {
     if (speedHits >= SPEED_BADGE_AT) earn('speed-5')
     if (s.stats.fixes + fixWins >= 10) earn('debugger')
     if (s.stats.matchesWon + matchWins >= 5) earn('memory-5')
-    if (s.stats.answers + questions.length >= 100) earn('answers-100')
-    if (s.stats.answers + questions.length >= 300) earn('answers-300')
+    // count the rounds actually PLAYED (QUALITY.md #11): a run that fails on
+    // round 3 of 10 records 3 answers, not 10 — keeps accuracy % + the
+    // answers-100/300 badges honest
+    const roundsPlayed = qIndex + 1
+    if (s.stats.answers + roundsPlayed >= 100) earn('answers-100')
+    if (s.stats.answers + roundsPlayed >= 300) earn('answers-300')
     if (outcome === 'done') {
       if (hp === MAX_HP) earn('perfect')
       if (isBoss) {
@@ -203,7 +209,7 @@ export function Run({ moduleId, isBoss, save, onExit }: Props) {
       earn('champion')
 
     s.xp += xpEarned
-    s.stats.answers += questions.length
+    s.stats.answers += roundsPlayed
     s.stats.correct += correctCount
     s.stats.bestCombo = Math.max(s.stats.bestCombo, bestCombo)
     s.stats.fixes += fixWins
@@ -245,6 +251,23 @@ export function Run({ moduleId, isBoss, save, onExit }: Props) {
     if (window.confirm('Quit this run? Progress in this run is lost.')) {
       onExit({ save: loadSave() })
     }
+  }
+
+  // ── recoverable screens (QUALITY.md #2/#5): a run that can't play
+  //    (unknown module id, empty bank) is shown, never thrown ──────────
+  if (!module || questions.length === 0) {
+    return (
+      <div className="run">
+        <div className="intro panel">
+          <div className="intro-icon">🗺️</div>
+          <h1 className="intro-title">MODULE NOT FOUND</h1>
+          <p className="intro-desc">This module doesn't exist (or has no questions). Head back to base.</p>
+          <button className="btn primary big" onClick={() => onExit({ save: loadSave() })}>
+            🏠 Home
+          </button>
+        </div>
+      </div>
+    )
   }
 
   // ── boss intro ────────────────────────────────────────

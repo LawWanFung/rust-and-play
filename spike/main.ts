@@ -63,7 +63,8 @@ const CASES: Record<string, string> = {
 codeEl.value = CASES.hello
 for (const btn of Array.from(document.querySelectorAll<HTMLButtonElement>('button.case'))) {
   btn.addEventListener('click', () => {
-    codeEl.value = CASES[btn.dataset.case!]
+    // unknown case id → fall back to hello, never the string "undefined"
+    codeEl.value = CASES[btn.dataset.case ?? 'hello'] ?? CASES.hello
     document.querySelectorAll<HTMLButtonElement>('button.case').forEach((b) => b.classList.remove('active'))
     btn.classList.add('active')
   })

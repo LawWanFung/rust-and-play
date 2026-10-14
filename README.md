@@ -68,7 +68,7 @@ See [PLAN.md](./PLAN.md).
 
 - [x] **v0.1** — game shell, Modules 1–2, Quiz + Predict, HP/combo/XP, ranks, badges, bosses, localStorage
 - [x] **v0.2** — Fix-the-Bug + Memory Match modes, all 10 modules (235 questions), full badge set
-- [ ] **v0.3** — rustc-wasm sandbox (type real Rust, real compile errors, in-browser)
+- [x] **v0.3** — rustc-wasm sandbox (type real Rust, real compile errors, in-browser)
 - [ ] **v0.4** — sounds, themes, local leaderboard, daily challenge
 
 ## Stack

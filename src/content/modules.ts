@@ -24,8 +24,9 @@ export const MODULES: ModuleDef[] = [
   m10Async,
 ]
 
-export function getModule(id: string): ModuleDef {
-  const m = MODULES.find((m) => m.id === id)
-  if (!m) throw new Error(`unknown module: ${id}`)
-  return m
+/** Unknown id → null (a caller-renderable edge case, never a throw —
+ *  QUALITY.md #2). App only ever passes ids from MODULES, but a stale
+ *  deep-link or a module removed from the array must not crash the tree. */
+export function getModule(id: string): ModuleDef | null {
+  return MODULES.find((m) => m.id === id) ?? null
 }

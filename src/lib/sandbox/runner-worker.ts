@@ -205,7 +205,6 @@ async function ensureWarm(): Promise<Warm> {
 
 async function doEnsureWarm(): Promise<Warm> {
   post({ kind: 'progress', id: currentId, pct: 5, label: 'fetching std libraries (27 files, ~98 MB)' })
-  void currentId
   const libContents: [string, Inode][] = []
   for (let i = 0; i < RLIBS.length; i++) {
     const name = RLIBS[i]
@@ -244,7 +243,8 @@ async function doEnsureWarm(): Promise<Warm> {
 // ---------------------------------------------------------------- run
 
 self.onmessage = async (ev: MessageEvent) => {
-  const msg = ev.data as Msg
+  const msg = ev.data as Partial<Msg> | null | undefined
+  if (typeof msg !== 'object' || msg === null || typeof msg.kind !== 'string') return
   if (msg.kind === 'warm') {
     // readiness = assets fetched + module compiled. No `w.start` here —
     // a parked warmup run must never be able to wedge the ready state.
@@ -257,10 +257,17 @@ self.onmessage = async (ev: MessageEvent) => {
     return
   }
   if (msg.kind !== 'run' || busy) return
+  // validate payload shape: a malformed message must fail this run and
+  // release `busy` — never wedge the worker forever (QUALITY.md #8)
+  if (typeof msg.source !== 'string' || !Array.isArray(msg.args) || !(msg.heartbeat instanceof SharedArrayBuffer)) {
+    post({ kind: 'result', id: 0, code: -998, out: '', err: 'malformed run message' })
+    return
+  }
+  const runMsg = msg as RunMsg
   busy = true
-  currentId = msg.id
+  currentId = runMsg.id
 
-  const hb = new DataView(msg.heartbeat as SharedArrayBuffer)
+  const hb = new DataView(runMsg.heartbeat)
   const tick = () => {
     try {
       hb.setBigInt64(0, BigInt(Date.now()), true)
@@ -272,14 +279,14 @@ self.onmessage = async (ev: MessageEvent) => {
   try {
     const { module, sysroot } = await ensureWarm()
 
-    const workDir = new Directory([['main.rs', new File(new TextEncoder().encode(msg.source))]])
+    const workDir = new Directory([['main.rs', new File(new TextEncoder().encode(runMsg.source))]])
     post({ kind: 'progress', id: currentId, pct: 90, label: 'running rustc' })
 
     const memory = new WebAssembly.Memory({ initial: 256, maximum: 16384, shared: true })
     const stdout = new Cap('out')
     const stderr = new Cap('err')
     const w = new WASI(
-      msg.args,
+      runMsg.args,
       [],
       [
         new Cap('sys'),
