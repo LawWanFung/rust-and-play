@@ -79,11 +79,14 @@ mkdirSync(path.dirname(tarballRel), { recursive: true })
 mkdirSync(libRel, { recursive: true })
 
 console.log(`↓ ${url}`)
-// --ssl-no-revoke: the corporate proxy's TLS-interception certificate fails
-// Windows revocation checks (CRYPT_E_REVOCATION_OFFLINE) and the download
-// fails without this; integrity is guaranteed by the hash checks below, not
-// by the CRL check.
-execSync(`curl -fL --ssl-no-revoke --max-time 1800 -o ${tarballRel} ${url}`, { stdio: 'inherit' })
+// --ssl-no-revoke is a schannel (Windows) curl option: the corporate
+// proxy's TLS-interception certificate fails Windows revocation checks
+// (CRYPT_E_REVOCATION_OFFLINE) and the download fails without it. It is
+// UNKNOWN to Linux/macOS curl (OpenSSL) — which would abort the docker
+// build — so it is only added on win32. Integrity is guaranteed by the
+// hash checks below, not by the CRL check.
+const sslFlag = process.platform === 'win32' ? '--ssl-no-revoke' : ''
+execSync(`curl -fL ${sslFlag} --max-time 1800 -o ${tarballRel} ${url}`, { stdio: 'inherit' })
 console.log(`  tarball: ${(statSync(tarballRel).size / 1e6).toFixed(1)}MB`)
 
 // ---------------------------------------------------------------- verify

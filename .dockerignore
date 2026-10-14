@@ -1,0 +1,24 @@
+# Git
+.git
+.gitignore
+
+# Node
+node_modules
+npm-debug.log*
+
+# Build output (recreated inside the image)
+dist
+
+# Spike assets — 175 MB of git-ignored binaries. NEVER ship the local copy
+# in the build context: the `fetcher` stage downloads the pinned,
+# hash-verified copies inside the image (scripts/fetch-spike-assets.mjs).
+public/spike
+
+# Local env files
+.env
+.env.*
+
+# Docs / OS cruft
+*.md
+.DS_Store
+Thumbs.db

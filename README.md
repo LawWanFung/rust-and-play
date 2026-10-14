@@ -75,6 +75,17 @@ See [PLAN.md](./PLAN.md).
 
 Vite + React + TypeScript. Pure static SPA — deploy anywhere.
 
+## Deploy
+
+- **Docker / Dokploy** (recommended — the in-browser rustc sandbox works): one nginx
+  container built from the multi-stage `Dockerfile`; see [DEPLOY.md](./DEPLOY.md).
+  ```bash
+  docker compose up --build   # → http://localhost:8080 (+ /spike/)
+  ```
+- **Any static host** (GitHub Pages, Netlify, …): `npm run build` → serve `dist/`.
+  The sandbox degrades gracefully to the multiple-choice flow (those hosts can't
+  send the COOP/COEP headers `SharedArrayBuffer` requires).
+
 ## Security
 
 See [SECURITY.md](./SECURITY.md) — the full review (2026-10-13) of the in-browser rustc sandbox:

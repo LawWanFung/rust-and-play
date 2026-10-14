@@ -1,0 +1,24 @@
+# RustQuest — Docker Compose (local + Dokploy)
+#
+#   docker compose up --build      # → http://localhost:8080  (app)
+#                                  # → http://localhost:8080/spike/  (rustc dev rig)
+#
+# Dokploy: this file is picked up as-is (Add Service → Compose). The PORT
+# env var (settable in Dokploy's environment UI, written to .env) controls
+# the host-side port; Traefik routing uses it.
+
+services:
+  web:
+    build: .
+    image: rustquest:latest
+    ports:
+      - "${PORT:-8080}:80"
+    restart: unless-stopped
+    healthcheck:
+      test: ["CMD", "wget", "-q", "--spider", "http://127.0.0.1/"]
+      interval: 30s
+      timeout: 5s
+      retries: 3
+      start_period: 10s
+    # The container is a static file server; it idles at a few MB.
+    # (nginx workers are spawned by the image's default config.)
